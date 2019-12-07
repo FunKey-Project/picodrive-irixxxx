@@ -32,6 +32,10 @@
 #include "file_stream_transforms.h"
 #endif
 
+#if defined(__GNUC__) && __GNUC__ >= 7
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
+
 #ifndef _WIN32
 #define PATH_SEP      "/"
 #define PATH_SEP_C    '/'
