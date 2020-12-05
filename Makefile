@@ -33,7 +33,7 @@ gperf ?= 0
 
 ifneq ("$(PLATFORM)", "libretro")
 	CFLAGS += -Wall -g
-ifneq ($(findstring gcc,$(CC)),)
+ifneq ($(findstring gcc,$(shell $(CC) -v 2>&1)),)
 	CFLAGS += -ffunction-sections -fdata-sections
 	LDFLAGS += -Wl,--gc-sections
 endif
