@@ -811,7 +811,7 @@ static void dr_block_link(struct block_entry *be, struct block_link *bl, int emi
         // via blx: @jump near jumpcc to blx; @blx far jump
         emith_jump_patch(jump, bl->blx, &jump);
         emith_jump_at(bl->blx, be->tcache_ptr);
-        host_instructions_updated(bl->blx, bl->blx + emith_jump_at_size(),
+        host_instructions_updated(bl->blx, (char *)bl->blx + emith_jump_at_size(),
             ((uintptr_t)bl->blx & 0x1f) + emith_jump_at_size()-1 > 0x1f);
       }
     } else {
@@ -849,7 +849,7 @@ static void dr_block_unlink(struct block_link *bl, int emit_jump)
         // via blx: @jump near jumpcc to blx; @blx load target_pc, far jump
         emith_jump_patch(bl->jump, bl->blx, &jump);
         memcpy(bl->blx, bl->jdisp, emith_jump_at_size());
-        host_instructions_updated(bl->blx, bl->blx + emith_jump_at_size(), 1);
+        host_instructions_updated(bl->blx, (char *)bl->blx + emith_jump_at_size(), 1);
       } else {
         printf("unknown BL type %d\n", bl->type);
         exit(1);

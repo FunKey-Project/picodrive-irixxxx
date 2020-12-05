@@ -4,14 +4,13 @@
 *.lib
 *.pdb
 *.manifest
-*.dll.map
+*.map
 *.exp
 *.dylib
 *.so
+*.a
 tags
 cscope.out
-PicoDrive.map
-*.map
 config.mak
 config.log
 cpu/musashi/m68kmake
@@ -31,4 +30,3 @@ PicoDrive.opk
 pico_int_offs.h
 amalgamate
 textfilter
-*.a
