@@ -87,6 +87,15 @@ extern int config_slot, config_slot_current;
 extern unsigned char *movie_data;
 extern int reset_timing;
 extern int flip_after_sync;
+extern int show_fps_bypass;
+extern int need_screen_cleared;
+extern int mQuickSaveAndPoweroff;
+
+extern char *prog_name;
+extern char *mRomName;
+extern char *mRomPath;
+extern char *quick_save_file;
+extern char *cfg_file_rom;
 
 #define PICO_PEN_ADJUST_X 4
 #define PICO_PEN_ADJUST_Y 2
@@ -94,7 +103,7 @@ extern int pico_pen_x, pico_pen_y;
 extern int pico_inp_mode;
 
 extern const char *rom_fname_reload;		// ROM to try loading on next PGS_ReloadRom
-extern char rom_fname_loaded[512];		// currently loaded ROM filename
+extern char rom_fname_loaded[1024];		// currently loaded ROM filename
 
 // engine states
 extern int engineState;
@@ -118,6 +127,7 @@ void  emu_loop(void);
 int   emu_reload_rom(const char *rom_fname_in);
 int   emu_swap_cd(const char *fname);
 int   emu_save_load_game(int load, int sram);
+int   emu_save_load_game_from_file(int load, char *saveFname);
 void  emu_reset_game(void);
 
 void  emu_prep_defconfig(void);
@@ -165,6 +175,8 @@ void pemu_sound_start(void);
 void plat_early_init(void);
 void plat_init(void);
 void plat_finish(void);
+void plat_set_sms_input(void);
+void plat_set_genesis_input(void);
 
 /* used before things blocking for a while (these funcs redraw on return) */
 void plat_status_msg_busy_first(const char *msg);

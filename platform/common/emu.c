@@ -21,6 +21,7 @@
 #include "../libpicofe/lprintf.h"
 #include "../libpicofe/plat.h"
 #include "emu.h"
+#include "configfile.h"
 #include "input_pico.h"
 #include "menu_pico.h"
 #include "config_file.h"
@@ -60,13 +61,15 @@ int pico_pen_x = 320/2, pico_pen_y = 240/2;
 int pico_inp_mode;
 int flip_after_sync;
 int engineState = PGS_Menu;
+int show_fps_bypass = 0;
+int need_screen_cleared = 0;
 
 static short __attribute__((aligned(4))) sndBuffer[2*44100/50];
 
 /* tmp buff to reduce stack usage for plats with small stack */
-static char static_buff[512];
+static char static_buff[1024];
 const char *rom_fname_reload;
-char rom_fname_loaded[512];
+char rom_fname_loaded[1024];
 int reset_timing = 0;
 static unsigned int notice_msg_time;	/* when started showing */
 static char noticeMsg[40];
@@ -119,9 +122,13 @@ static void fname_ext(char *dst, int dstlen, const char *prefix, const char *ext
 
 	*dst = 0;
 	if (prefix) {
-		int len = plat_get_root_dir(dst, dstlen);
+		/*int len = plat_get_root_dir(dst, dstlen);
 		strcpy(dst + len, prefix);
-		prefix_len = len + strlen(prefix);
+		prefix_len = len + strlen(prefix);*/
+
+		/* Saves are in ROM folder */
+		prefix_len = strlen(mRomPath)+1;
+		sprintf(dst, "%s/", mRomPath);
 	}
 
 	p = fname + strlen(fname) - 1;
@@ -349,7 +356,9 @@ static void system_announce(void)
 	tv_standard = Pico.m.pal ? "PAL" : "NTSC";
 	fps = Pico.m.pal ? 50 : 60;
 
-	emu_status_msg("%s %s / %dFPS%s", tv_standard, sys_name, fps, extra);
+	//emu_status_msg("%s %s / %dFPS%s", tv_standard, sys_name, fps, extra);
+	printf("\nSystem Announce: %s, %s / %dFPS%s\n", sys_name, tv_standard, fps, extra);
+	printf("PicoIn.AHW = %d, Pico.m.hardware=%d\n", PicoIn.AHW, Pico.m.hardware);
 }
 
 static void do_region_override(const char *media_fname)
@@ -496,6 +505,15 @@ int emu_reload_rom(const char *rom_fname_in)
 	{
 		system_announce();
 		PicoIn.opt &= ~POPT_DIS_VDP_FIFO;
+	}
+
+	/* Set input map */
+	if (PicoIn.AHW & PAHW_SMS) {
+		printf("plat set sms input\n");
+		plat_set_sms_input();
+	}
+	else{
+		plat_set_genesis_input();
 	}
 
 	strncpy(rom_fname_loaded, rom_fname, sizeof(rom_fname_loaded)-1);
@@ -873,6 +891,19 @@ int emu_check_save_file(int slot, int *time)
 	return emu_get_save_fname(1, 0, slot, time) ? 1 : 0;
 }
 
+int emu_save_load_game_from_file(int load, char *saveFname){
+	int ret = PicoState(saveFname, !load);
+	if (!ret) {
+		//emu_status_msg(load ? "STATE LOADED" : "STATE SAVED");
+	} else {
+		//emu_status_msg(load ? "LOAD FAILED" : "SAVE FAILED");
+		ret = -1;
+	}
+
+	return ret;
+}
+
+
 int emu_save_load_game(int load, int sram)
 {
 	int ret = 0;
@@ -881,8 +912,8 @@ int emu_save_load_game(int load, int sram)
 	// make save filename
 	saveFname = emu_get_save_fname(load, sram, state_slot, NULL);
 	if (saveFname == NULL) {
-		if (!sram)
-			emu_status_msg(load ? "LOAD FAILED (missing file)" : "SAVE FAILED");
+		/*if (!sram)
+			emu_status_msg(load ? "LOAD FAILED (missing file)" : "SAVE FAILED");*/
 		return -1;
 	}
 
@@ -950,9 +981,9 @@ int emu_save_load_game(int load, int sram)
 #ifdef __GP2X__
 			if (!load) sync();
 #endif
-			emu_status_msg(load ? "STATE LOADED" : "STATE SAVED");
+			//emu_status_msg(load ? "STATE LOADED" : "STATE SAVED");
 		} else {
-			emu_status_msg(load ? "LOAD FAILED" : "SAVE FAILED");
+			//emu_status_msg(load ? "LOAD FAILED" : "SAVE FAILED");
 			ret = -1;
 		}
 
@@ -1092,6 +1123,11 @@ static void do_turbo(unsigned short *pad, int acts)
 
 static void run_events_ui(unsigned int which)
 {
+	char shell_cmd[100];
+	FILE *fp;
+	//emu_action_old = emu_action;
+	//printf("New event: %d\n", which);
+
 	if (which & (PEV_STATE_LOAD|PEV_STATE_SAVE))
 	{
 		int do_it = 1;
@@ -1135,6 +1171,155 @@ static void run_events_ui(unsigned int which)
 	if (which & PEV_SWITCH_RND)
 	{
 		plat_video_toggle_renderer(1, 0);
+	}
+	if (which & PEV_VOL_DOWN)
+	{
+		printf("PEV_VOL_DOWN\r\n");
+		/// ----- Compute new value -----
+		volume_percentage = (volume_percentage < STEP_CHANGE_VOLUME)?
+			0:(volume_percentage-STEP_CHANGE_VOLUME);
+		/// ----- HUD msg ------
+		char txt[100];
+		sprintf(txt, "VOLUME %d%%", volume_percentage);
+		plat_status_msg_busy_first(txt);
+		/// ----- Shell cmd ----
+		sprintf(shell_cmd, "%s %d", SHELL_CMD_VOLUME_SET, volume_percentage);
+		fp = popen(shell_cmd, "r");
+		if (fp == NULL) {
+			printf("Failed to run command %s\n", shell_cmd);
+		}
+	}
+	if (which & PEV_VOL_UP)
+	{
+		printf("PEV_VOL_UP\r\n");
+		/// ----- Compute new value -----
+		volume_percentage = (volume_percentage > 100 - STEP_CHANGE_VOLUME)?
+			100:(volume_percentage+STEP_CHANGE_VOLUME);
+		/// ----- HUD msg ------
+		char txt[100];
+		sprintf(txt, "VOLUME %d%%", volume_percentage);
+		plat_status_msg_busy_first(txt);
+		/// ----- Shell cmd ----
+		sprintf(shell_cmd, "%s %d", SHELL_CMD_VOLUME_SET, volume_percentage);
+		fp = popen(shell_cmd, "r");
+		if (fp == NULL) {
+			printf("Failed to run command %s\n", shell_cmd);
+		}
+	}
+	if (which & PEV_BRIGHT_UP)
+	{
+		printf("PEV_BRIGHT_UP\r\n");
+		/// ----- Compute new value -----
+		brightness_percentage = (brightness_percentage > 100 - STEP_CHANGE_BRIGHTNESS)?
+			100:(brightness_percentage+STEP_CHANGE_BRIGHTNESS);
+		/// ----- HUD msg ------
+		char txt[100];
+		sprintf(txt, "BRIGHTNESS %d%%", brightness_percentage);
+		plat_status_msg_busy_first(txt);
+		/// ----- Shell cmd ----
+		sprintf(shell_cmd, "%s %d", SHELL_CMD_BRIGHTNESS_SET, brightness_percentage);
+		fp = popen(shell_cmd, "r");
+		if (fp == NULL) {
+			printf("Failed to run command %s\n", shell_cmd);
+		}
+	}
+	if (which & PEV_BRIGHT_DOWN)
+	{
+		printf("PEV_BRIGHT_DOWN\r\n");
+		/// ----- Compute new value -----
+		brightness_percentage = (brightness_percentage < STEP_CHANGE_BRIGHTNESS)?
+			0:(brightness_percentage-STEP_CHANGE_BRIGHTNESS);
+		/// ----- HUD msg ------
+		char txt[100];
+		sprintf(txt, "BRIGHTNESS %d%%", brightness_percentage);
+		plat_status_msg_busy_first(txt);
+		/// ----- Shell cmd ----
+		sprintf(shell_cmd, "%s %d", SHELL_CMD_BRIGHTNESS_SET, brightness_percentage);
+		fp = popen(shell_cmd, "r");
+		if (fp == NULL) {
+			printf("Failed to run command %s\n", shell_cmd);
+		}
+	}
+	if (which & PEV_AR_FACT_UP)
+	{
+		printf("PEV_AR_FACT_UP\r\n");
+		/// ----- Compute new value -----
+		if(aspect_ratio == ASPECT_RATIOS_TYPE_MANUAL){
+			aspect_ratio_factor_percent = (aspect_ratio_factor_percent+aspect_ratio_factor_step<100)?
+				aspect_ratio_factor_percent+aspect_ratio_factor_step:100;
+			need_screen_cleared = 1;
+		}
+		else{
+			aspect_ratio = ASPECT_RATIOS_TYPE_MANUAL;
+		}
+		aspect_ratio = ASPECT_RATIOS_TYPE_MANUAL;
+		/// ----- HUD msg ------
+		/*char txt[100];
+		sprintf(txt, "    DISPLAY MODE: ZOOMED - %d%%", aspect_ratio_factor_percent);
+		plat_status_msg_busy_first(txt);*/
+		sprintf(shell_cmd, "%s %d \"    DISPLAY MODE: ZOOMED %d%%%%\"",
+			SHELL_CMD_NOTIF, NOTIF_SECONDS_DISP, aspect_ratio_factor_percent);
+		fp = popen(shell_cmd, "r");
+		if (fp == NULL) {
+			printf("Failed to run command %s\n", shell_cmd);
+		}
+
+        // Save config file
+        configfile_save(cfg_file_rom);
+	}
+	if (which & PEV_AR_FACT_DOWN)
+	{
+		printf("PEV_AR_FACT_DOWN\r\n");
+		/// ----- Compute new value -----
+		if(aspect_ratio == ASPECT_RATIOS_TYPE_MANUAL){
+			aspect_ratio_factor_percent = (aspect_ratio_factor_percent>aspect_ratio_factor_step)?
+				aspect_ratio_factor_percent-aspect_ratio_factor_step:0;
+			need_screen_cleared = 1;
+		}
+		else{
+			aspect_ratio = ASPECT_RATIOS_TYPE_MANUAL;
+		}
+		aspect_ratio = ASPECT_RATIOS_TYPE_MANUAL;
+		/// ----- HUD msg ------
+		/*char txt[100];
+		sprintf(txt, "    DISPLAY MODE: ZOOMED - %d%%", aspect_ratio_factor_percent);
+		plat_status_msg_busy_first(txt);*/
+        sprintf(shell_cmd, "%s %d \"    DISPLAY MODE: ZOOMED %d%%%%\"",
+			SHELL_CMD_NOTIF, NOTIF_SECONDS_DISP, aspect_ratio_factor_percent);
+        fp = popen(shell_cmd, "r");
+        if (fp == NULL) {
+		printf("Failed to run command %s\n", shell_cmd);
+
+        // Save config file
+        configfile_save(cfg_file_rom);
+	}
+
+	}
+	if (which & PEV_DISPMODE)
+	{
+		printf("PEV_DISPMODE\r\n");
+		/// ----- Compute new value -----
+		aspect_ratio = (aspect_ratio+1)%NB_ASPECT_RATIOS_TYPES;
+		/// ----- HUD msg ------
+		//char txt[100];
+		if(aspect_ratio == ASPECT_RATIOS_TYPE_MANUAL){
+			//sprintf(txt, "    DISPLAY MODE: ZOOMED - %d%%", aspect_ratio_factor_percent);
+			sprintf(shell_cmd, "%s %d \"    DISPLAY MODE: ZOOMED %d%%%%\"",
+				SHELL_CMD_NOTIF, NOTIF_SECONDS_DISP, aspect_ratio_factor_percent);
+		}
+		else{
+			//sprintf(txt, "DISPLAY MODE: %s", aspect_ratio_name[aspect_ratio]);
+			sprintf(shell_cmd, "%s %d \"    DISPLAY MODE: %s\"",
+				SHELL_CMD_NOTIF, NOTIF_SECONDS_DISP, aspect_ratio_name[aspect_ratio]);
+		}
+		//plat_status_msg_busy_first(txt);
+		fp = popen(shell_cmd, "r");
+		if (fp == NULL) {
+			printf("Failed to run command %s\n", shell_cmd);
+		}
+
+        // Save config file
+        configfile_save(cfg_file_rom);
 	}
 	if (which & (PEV_SSLOT_PREV|PEV_SSLOT_NEXT))
 	{
@@ -1191,10 +1376,13 @@ void emu_update_input(void)
 
 	events &= ~prev_events;
 
+	/* SMS */
 	if (PicoIn.AHW == PAHW_PICO)
 		run_events_pico(events);
+
 	if (events)
 		run_events_ui(events);
+
 	if (movie_data)
 		update_movie();
 
@@ -1235,6 +1423,39 @@ void emu_cmn_forced_frame(int no_scale, int do_emu, void *buf)
 
 	PicoIn.opt = po_old;
 }
+
+
+
+
+/* Quick save and turn off the console */
+void quick_save_and_poweroff()
+{
+    printf("Save Instant Play file\n");
+
+    /* Send command to cancel any previously scheduled powerdown */
+    if (popen(SHELL_CMD_CANCEL_SCHED_POWERDOWN, "r") == NULL)
+    {
+        /* Countdown is still ticking, so better do nothing
+	   than start writing and get interrupted!
+	*/
+        printf("Failed to cancel scheduled shutdown\n");
+	exit(0);
+    }
+
+    /* Save  */
+    emu_save_load_game_from_file(0, quick_save_file);
+
+    /* Perform Instant Play save and shutdown */
+    execlp(SHELL_CMD_INSTANT_PLAY, SHELL_CMD_INSTANT_PLAY,
+	   prog_name, "-loadStateFile", quick_save_file, mRomName, NULL);
+
+    /* Should not be reached */
+    printf("Failed to perform Instant Play save and shutdown\n");
+
+    /* Exit Emulator */
+    exit(0);
+}
+
 
 void emu_init(void)
 {
@@ -1309,6 +1530,8 @@ void emu_sound_start(void)
 	if (currentConfig.EmuOpt & EOPT_EN_SOUND)
 	{
 		int is_stereo = (PicoIn.opt & POPT_EN_STEREO) ? 1 : 0;
+		/// Hard Bypass Stereo to mono
+		//is_stereo = 0;
 
 		PsndRerate(Pico.m.frame_count ? 1 : 0);
 
@@ -1444,8 +1667,10 @@ void emu_loop(void)
 			sprintf(fpsbuff, "%02i/%02i/%02i", frames_shown, bench_fps_s, (bf[0]+bf[1]+bf[2]+bf[3])>>2);
 			printf("%s\n", fpsbuff);
 #else
-			if (currentConfig.EmuOpt & EOPT_SHOW_FPS)
+			if (currentConfig.EmuOpt & EOPT_SHOW_FPS || show_fps_bypass){
+				printf("%02i/%02i  \n", frames_shown, frames_done);
 				snprintf(fpsbuff, 8, "%02i/%02i  ", frames_shown, frames_done);
+			}
 #endif
 			frames_shown = frames_done = 0;
 			timestamp_fps_x3 += ms_to_ticks(1000) * 3;
@@ -1485,6 +1710,12 @@ void emu_loop(void)
 			timestamp_aim_x3 += target_frametime_x3;
 			diff = timestamp_aim_x3 - timestamp_x3;
 		}
+
+        /* Quick save and poweroff */
+        if(mQuickSaveAndPoweroff){
+		quick_save_and_poweroff();
+		mQuickSaveAndPoweroff = 0;
+        }
 
 		emu_update_input();
 		if (skip) {
