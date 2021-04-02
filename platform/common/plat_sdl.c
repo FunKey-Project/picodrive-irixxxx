@@ -1548,6 +1548,7 @@ void plat_video_flip(void)
 		/* Surface with game data */
 		SDL_Surface *game_surface;
 
+#if 0
 		/* Sega Master System -> 256*192 res in 320*240 surface */
 		if (PicoIn.AHW & PAHW_SMS){
 
@@ -1566,6 +1567,9 @@ void plat_video_flip(void)
 		else{
 			game_surface = plat_sdl_screen;
 		}
+#else
+    game_surface = plat_sdl_screen;
+#endif
 
 
 		  /// --------------Optimized Flip depending on aspect ratio -------------
@@ -1631,15 +1635,15 @@ void plat_video_flip(void)
 		SDL_Flip(hw_screen);
 
 
-		g_screen_ptr = plat_sdl_screen->pixels;
-		PicoDrawSetOutBuf(g_screen_ptr, g_screen_ppitch * 2);
+		/*g_screen_ptr = plat_sdl_screen->pixels;
+		PicoDrawSetOutBuf(g_screen_ptr, g_screen_ppitch * 2);*/
 	}
-	if (clear_stat_cnt) {
+	/*if (clear_stat_cnt) {
 		unsigned short *d = (unsigned short *)g_screen_ptr + g_screen_ppitch * g_screen_height;
 		int l = g_screen_ppitch * 8;
 		memset((int *)(d - l), 0, l * 2);
 		clear_stat_cnt--;
-	}
+	}*/
 }
 
 void plat_video_wait_vsync(void)
