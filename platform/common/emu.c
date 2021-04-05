@@ -206,9 +206,11 @@ static const char *find_bios(int *region, const char *cd_fname)
 		return 0;
 	}
 
+	/** Check Bios files in home directory */
 	for (i = 0; i < count; i++)
 	{
 		emu_make_path(static_buff, files[i], sizeof(static_buff) - 4);
+		printf("static_buff: %s\n", static_buff);
 		strcat(static_buff, ".bin");
 		f = fopen(static_buff, "rb");
 		if (f) break;
@@ -219,14 +221,74 @@ static const char *find_bios(int *region, const char *cd_fname)
 		if (f) break;
 	}
 
+	if(!f){
+		/** Check Bios files in rom path */
+		for (i = 0; i < count; i++)
+		{
+			sprintf(static_buff, "%s/%s", mRomPath, files[i]);
+			printf("static_buff: %s\n", static_buff);
+			strcat(static_buff, ".bin");
+			f = fopen(static_buff, "rb");
+			if (f) break;
+
+			static_buff[strlen(static_buff) - 4] = 0;
+			strcat(static_buff, ".zip");
+			f = fopen(static_buff, "rb");
+			if (f) break;
+		}
+	}
+
 	if (f) {
 		lprintf("using bios: %s\n", static_buff);
 		fclose(f);
 		return static_buff;
 	} else {
-		sprintf(static_buff, "no %s BIOS files found, read docs",
-			*region != 4 ? (*region == 8 ? "EU" : "JAP") : "USA");
+		char* country;
+		char** bios_names;
+		if(*region == 4){ //USA
+			country = "USA";
+			bios_names = biosfiles_us;
+		}
+		else if(*region == 8){ //EU
+			country = "EU";
+			bios_names = biosfiles_eu;
+		}
+		else{ //JAP
+			country = "JAP";
+			bios_names = biosfiles_jp;
+		}
+
+		sprintf(static_buff, "no %s BIOS files found, read docs", country);
 		menu_update_msg(static_buff);
+
+		/** Set notif for BIOS */
+	    char shell_cmd[400];
+	    sprintf(shell_cmd, "%s 0 \"    %s BIOS FILE MISSING^^Connect your FunKey S to ^your computer and copy the^BIOS file to the game folder^^The file can be called:^ - %s.bin^ - %s.bin^ - %s.bin^ - %s.bin^^For more instructions:^www.funkey-project.com^^Press any button to exit...\"",
+	            SHELL_CMD_NOTIF, country, bios_names[0], bios_names[1], bios_names[2], bios_names[3]);
+	    FILE *fp = popen(shell_cmd, "r");
+	    if (fp == NULL) {
+	        printf("In %s, Failed to run command %s\n", __func__, shell_cmd);
+	    }
+
+	    /** Wait for key press */
+	    SDL_Event event;
+	    while(event.type != SDL_KEYUP && event.type != SDL_QUIT){
+	        while (SDL_PollEvent(&event))
+			SDL_Delay(60);
+	    }
+
+	    /** Clear notif for BIOS */
+	    fp = popen(SHELL_CMD_NOTIF_CLEAR, "r");
+	    if (fp == NULL) {
+	        printf("In %s, Failed to run command %s\n", __func__, SHELL_CMD_NOTIF_CLEAR);
+	    }
+
+	    /** Force clean exit */
+        //engineState = PGS_Quit;
+		emu_finish();
+		plat_finish();
+		plat_target_finish();
+		exit(0);
 		return NULL;
 	}
 }
