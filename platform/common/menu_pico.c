@@ -14,7 +14,7 @@
 #include <SDL/SDL_image.h>
 
 #include "emu.h"
-#include "configfile.h"
+#include "configfile_fk.h"
 #include "menu_pico.h"
 #include "input_pico.h"
 #include "../libpicofe/input.h"

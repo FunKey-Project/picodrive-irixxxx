@@ -16,7 +16,7 @@
 #include "../libpicofe/in_sdl.h"
 #include "../libpicofe/gl.h"
 #include "emu.h"
-#include "configfile.h"
+#include "configfile_fk.h"
 #include "menu_pico.h"
 #include "input_pico.h"
 #include "plat_sdl.h"
