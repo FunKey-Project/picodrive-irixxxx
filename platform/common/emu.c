@@ -727,7 +727,7 @@ int emu_read_config(const char *rom_fname, int no_defaults)
 		else
 			strcpy(ext, ".cfg");
 
-		fname_ext(cfg, sizeof(cfg), "cfg"PATH_SEP, ext, rom_fname);
+		fname_ext(cfg, sizeof(cfg), "cfg"PATH_SEP, ext, rom_fname); // gamepath/gamename.cfg
 
 		// read user's config
 		vol = currentConfig.volume;
@@ -737,10 +737,10 @@ int emu_read_config(const char *rom_fname, int no_defaults)
 		if (ret != 0)
 		{
 			// read global config, and apply game_def.cfg on top
-			make_config_cfg(cfg);
+			make_config_cfg(cfg); // $HOME/.picodrive/config2.cfg
 			config_readsect(cfg, NULL);
 
-			emu_make_path(cfg, "game_def.cfg", sizeof(cfg));
+			emu_make_path(cfg, "game_def.cfg", sizeof(cfg)); // $HOME/.picodrive/game_def.cfg
 			ret = config_readsect(cfg, emu_make_rom_id(rom_fname));
 		}
 	}
@@ -1350,11 +1350,11 @@ static void run_events_ui(unsigned int which)
 			SHELL_CMD_NOTIF, NOTIF_SECONDS_DISP, aspect_ratio_factor_percent);
         fp = popen(shell_cmd, "r");
         if (fp == NULL) {
-		printf("Failed to run command %s\n", shell_cmd);
+			printf("Failed to run command %s\n", shell_cmd);
+		}
 
         // Save config file
         configfile_save(cfg_file_rom);
-	}
 
 	}
 	if (which & PEV_DISPMODE)
