@@ -21,7 +21,7 @@
 #include "../libpicofe/lprintf.h"
 #include "../libpicofe/plat.h"
 #include "emu.h"
-#include "configfile.h"
+#include "configfile_fk.h"
 #include "input_pico.h"
 #include "menu_pico.h"
 #include "config_file.h"

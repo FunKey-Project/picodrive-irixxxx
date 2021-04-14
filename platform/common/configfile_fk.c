@@ -6,7 +6,7 @@
 #include <assert.h>
 #include <ctype.h>
 
-#include "configfile.h"
+#include "configfile_fk.h"
 
 #define ARRAY_LEN(arr) (sizeof(arr) / sizeof(arr[0]))
 
