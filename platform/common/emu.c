@@ -268,6 +268,8 @@ static const char *find_bios(int *region, const char *cd_fname)
 	    FILE *fp = popen(shell_cmd, "r");
 	    if (fp == NULL) {
 	        printf("In %s, Failed to run command %s\n", __func__, shell_cmd);
+	    } else {
+	        pclose(fp);
 	    }
 
 	    /** Wait for key press */
@@ -281,6 +283,8 @@ static const char *find_bios(int *region, const char *cd_fname)
 	    fp = popen(SHELL_CMD_NOTIF_CLEAR, "r");
 	    if (fp == NULL) {
 	        printf("In %s, Failed to run command %s\n", __func__, SHELL_CMD_NOTIF_CLEAR);
+	    } else {
+	        pclose(fp);
 	    }
 
 	    /** Force clean exit */
@@ -1249,6 +1253,8 @@ static void run_events_ui(unsigned int which)
 		fp = popen(shell_cmd, "r");
 		if (fp == NULL) {
 			printf("Failed to run command %s\n", shell_cmd);
+		} else {
+	        	pclose(fp);
 		}
 	}
 	if (which & PEV_VOL_UP)
@@ -1266,6 +1272,8 @@ static void run_events_ui(unsigned int which)
 		fp = popen(shell_cmd, "r");
 		if (fp == NULL) {
 			printf("Failed to run command %s\n", shell_cmd);
+		} else {
+	        	pclose(fp);
 		}
 	}
 	if (which & PEV_BRIGHT_UP)
@@ -1283,6 +1291,8 @@ static void run_events_ui(unsigned int which)
 		fp = popen(shell_cmd, "r");
 		if (fp == NULL) {
 			printf("Failed to run command %s\n", shell_cmd);
+		} else {
+	        	pclose(fp);
 		}
 	}
 	if (which & PEV_BRIGHT_DOWN)
@@ -1300,6 +1310,8 @@ static void run_events_ui(unsigned int which)
 		fp = popen(shell_cmd, "r");
 		if (fp == NULL) {
 			printf("Failed to run command %s\n", shell_cmd);
+		} else {
+	        	pclose(fp);
 		}
 	}
 	if (which & PEV_AR_FACT_UP)
@@ -1324,6 +1336,8 @@ static void run_events_ui(unsigned int which)
 		fp = popen(shell_cmd, "r");
 		if (fp == NULL) {
 			printf("Failed to run command %s\n", shell_cmd);
+		} else {
+	        	pclose(fp);
 		}
 
         // Save config file
@@ -1346,11 +1360,13 @@ static void run_events_ui(unsigned int which)
 		/*char txt[100];
 		sprintf(txt, "    DISPLAY MODE: ZOOMED - %d%%", aspect_ratio_factor_percent);
 		plat_status_msg_busy_first(txt);*/
-        sprintf(shell_cmd, "%s %d \"    DISPLAY MODE: ZOOMED %d%%%%\"",
+		sprintf(shell_cmd, "%s %d \"    DISPLAY MODE: ZOOMED %d%%%%\"",
 			SHELL_CMD_NOTIF, NOTIF_SECONDS_DISP, aspect_ratio_factor_percent);
-        fp = popen(shell_cmd, "r");
-        if (fp == NULL) {
+		fp = popen(shell_cmd, "r");
+		if (fp == NULL) {
 			printf("Failed to run command %s\n", shell_cmd);
+		} else {
+	        	pclose(fp);
 		}
 
         // Save config file
@@ -1378,6 +1394,8 @@ static void run_events_ui(unsigned int which)
 		fp = popen(shell_cmd, "r");
 		if (fp == NULL) {
 			printf("Failed to run command %s\n", shell_cmd);
+		} else {
+	        	pclose(fp);
 		}
 
         // Save config file
@@ -1492,10 +1510,13 @@ void emu_cmn_forced_frame(int no_scale, int do_emu, void *buf)
 /* Quick save and turn off the console */
 void quick_save_and_poweroff()
 {
+    FILE *fp;
+
     printf("Save Instant Play file\n");
 
     /* Send command to cancel any previously scheduled powerdown */
-    if (popen(SHELL_CMD_CANCEL_SCHED_POWERDOWN, "r") == NULL)
+    fp = popen(SHELL_CMD_CANCEL_SCHED_POWERDOWN, "r");
+    if (fp == NULL)
     {
         /* Countdown is still ticking, so better do nothing
 	   than start writing and get interrupted!
@@ -1503,6 +1524,7 @@ void quick_save_and_poweroff()
         printf("Failed to cancel scheduled shutdown\n");
 	exit(0);
     }
+    pclose(fp);
 
     /* Save  */
     emu_save_load_game_from_file(0, quick_save_file);
