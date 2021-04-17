@@ -30,12 +30,13 @@
 
 char **g_argv;
 char *prog_name;
-static char *load_state_file = NULL;
-static int load_state_slot = -1;
+char *load_state_file = NULL;
+int load_state_slot = -1;
 static char *quick_save_file_extension = "quicksave";
 char *mRomName = NULL;
 char *mRomPath = NULL;
 char *quick_save_file = NULL;
+int need_quick_load = -1;
 char *cfg_file_default = NULL;
 char *cfg_file_rom = NULL;
 static char *cfg_file_default_name = "default_config";
@@ -204,29 +205,42 @@ int main(int argc, char *argv[])
 		if (emu_reload_rom(rom_fname_reload)) {
 			engineState = PGS_Running;
 
-			/* Load slot */
+			/* Load slot (if NOT sega CD) */
 			if(load_state_slot != -1){
-				printf("LOADING FROM SLOT %d...\n", load_state_slot+1);
-				char fname[1024];
-				emu_save_load_game(1, 0);
-				printf("LOADED FROM SLOT %d\n", load_state_slot+1);
-				load_state_slot = -1;
+
+				/* DO NOT put this if in the previous one, we need this here not to enter the next else */
+				if(!emu_is_segaCD()){
+					printf("LOADING FROM SLOT %d...\n", load_state_slot+1);
+					char fname[1024];
+					emu_save_load_game(1, 0);
+					printf("LOADED FROM SLOT %d\n", load_state_slot+1);
+					load_state_slot = -1;
+				}
 			}
-			/* Load file */
+			/* Load file (if NOT sega CD) */
 			else if(load_state_file != NULL){
-				printf("LOADING FROM FILE %s...\n", load_state_file);
-				emu_save_load_game_from_file(1, load_state_file);
-				printf("LOADED FROM SLOT %s\n", load_state_file);
-				load_state_file = NULL;
+
+				/* DO NOT put this if in the previous one, we need this here not to enter the next else */
+				if(!emu_is_segaCD()){
+					printf("LOADING FROM FILE %s...\n", load_state_file);
+					emu_save_load_game_from_file(1, load_state_file);
+					printf("LOADED FROM SLOT %s\n", load_state_file);
+					load_state_file = NULL;
+				}
 			}
-			/* Load quick save file */
+			/* Load quick save file (if NOT sega CD) */
 			else if(access( quick_save_file, F_OK ) != -1){
 				printf("Found quick save file: %s\n", quick_save_file);
 
 				int resume = launch_resume_menu_loop();
 				if(resume == RESUME_YES){
 					printf("Resume game from quick save file: %s\n", quick_save_file);
-					emu_save_load_game_from_file(1, quick_save_file);
+					if(emu_is_segaCD()){
+						need_quick_load = 1;
+					}
+					else{
+						emu_save_load_game_from_file(1, quick_save_file);
+					}
 				}
 				else{
 					printf("Reset game\n");
