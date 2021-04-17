@@ -245,6 +245,13 @@ int main(int argc, char *argv[])
 
 	for (;;)
 	{
+		/** Debug */
+		/*static int prev_engine_state = -1;
+		if(prev_engine_state != engineState){
+			printf("current engine state: %d, prev = %d\n", engineState, prev_engine_state);
+			prev_engine_state = engineState;
+		}*/
+
 		switch (engineState)
 		{
 			case PGS_Menu:

@@ -210,7 +210,7 @@ static const char *find_bios(int *region, const char *cd_fname)
 	for (i = 0; i < count; i++)
 	{
 		emu_make_path(static_buff, files[i], sizeof(static_buff) - 4);
-		printf("static_buff: %s\n", static_buff);
+		//printf("bios name static_buff: %s\n", static_buff);
 		strcat(static_buff, ".bin");
 		f = fopen(static_buff, "rb");
 		if (f) break;
