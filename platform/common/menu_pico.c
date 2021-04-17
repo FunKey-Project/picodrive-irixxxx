@@ -806,8 +806,8 @@ void run_menu_loop()
                             if (fp == NULL) {
                                 MENU_ERROR_PRINTF("Failed to run command %s\n", shell_cmd);
                             } else {
-			        pclose(fp);
-			    }
+            			        pclose(fp);
+            			    }
 
                             /// ------ Refresh screen ------
                             screen_refresh = 1;
@@ -824,7 +824,7 @@ void run_menu_loop()
                             if (fp == NULL) {
                                 MENU_ERROR_PRINTF("Failed to run command %s\n", shell_cmd);
                             } else {
-			        pclose(fp);
+			                     pclose(fp);
                             }
                         /// ------ Refresh screen ------
                             screen_refresh = 1;
@@ -882,7 +882,7 @@ void run_menu_loop()
                             if (fp == NULL) {
                                 MENU_ERROR_PRINTF("Failed to run command %s\n", shell_cmd);
                             } else {
-			        pclose(fp);
+			                     pclose(fp);
                             }
                             /// ------ Refresh screen ------
                             screen_refresh = 1;
@@ -899,7 +899,7 @@ void run_menu_loop()
                             if (fp == NULL) {
                                 MENU_ERROR_PRINTF("Failed to run command %s\n", shell_cmd);
                             } else {
-			        pclose(fp);
+			                     pclose(fp);
                             }
                             /// ------ Refresh screen ------
                             screen_refresh = 1;
@@ -966,8 +966,8 @@ void run_menu_loop()
                                 fp = popen(shell_cmd, "r");
                                 if (fp == NULL) {
                                     MENU_ERROR_PRINTF("Failed to run command %s\n", shell_cmd);
-				} else {
-				    pclose(fp);
+                				} else {
+                				    pclose(fp);
                                 }
 
                                 stop_menu_loop = 1;
@@ -1013,8 +1013,8 @@ void run_menu_loop()
                                 fp = popen(shell_cmd, "r");
                                 if (fp == NULL) {
                                     MENU_ERROR_PRINTF("Failed to run command %s\n", shell_cmd);
-				} else {
-				    pclose(fp);
+                				} else {
+                				    pclose(fp);
                                 }
 
                                 /*snprintf(hud_msg, sizeof(hud_msg), ret == 0 ? "LOADED" : "FAIL!");

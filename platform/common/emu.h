@@ -90,6 +90,9 @@ extern int flip_after_sync;
 extern int show_fps_bypass;
 extern int need_screen_cleared;
 extern int mQuickSaveAndPoweroff;
+extern char *load_state_file;
+extern int load_state_slot;
+extern int need_quick_load;
 
 extern char *prog_name;
 extern char *mRomName;
@@ -150,6 +153,7 @@ void  emu_update_input(void);
 void  emu_get_game_name(char *str150);
 void  emu_set_fastforward(int set_on);
 void  emu_status_msg(const char *format, ...);
+int   emu_is_segaCD();
 
 /* default sound code */
 void  emu_sound_start(void);

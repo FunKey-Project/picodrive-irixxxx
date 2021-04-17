@@ -210,7 +210,7 @@ static const char *find_bios(int *region, const char *cd_fname)
 	for (i = 0; i < count; i++)
 	{
 		emu_make_path(static_buff, files[i], sizeof(static_buff) - 4);
-		printf("static_buff: %s\n", static_buff);
+		//printf("bios name static_buff: %s\n", static_buff);
 		strcat(static_buff, ".bin");
 		f = fopen(static_buff, "rb");
 		if (f) break;
@@ -1504,8 +1504,9 @@ void emu_cmn_forced_frame(int no_scale, int do_emu, void *buf)
 	PicoIn.opt = po_old;
 }
 
-
-
+int emu_is_segaCD(){
+	return (PicoIn.AHW & PAHW_MCD);
+}
 
 /* Quick save and turn off the console */
 void quick_save_and_poweroff()
@@ -1669,6 +1670,7 @@ static void emu_loop_prep(void)
 void emu_loop(void)
 {
 	int frames_done, frames_shown;	/* actual frames for fps counter */
+	int frame_nb = 0;	
 	int target_frametime_x3;
 	unsigned int timestamp_x3 = 0;
 	unsigned int timestamp_aim_x3 = 0;
@@ -1678,6 +1680,8 @@ void emu_loop(void)
 	int fskip_cnt = 0;
 
 	fpsbuff[0] = 0;
+
+	printf("%s ------------------ \n", __func__);
 
 	PicoLoopPrepare();
 
@@ -1797,8 +1801,8 @@ void emu_loop(void)
 
         /* Quick save and poweroff */
         if(mQuickSaveAndPoweroff){
-		quick_save_and_poweroff();
-		mQuickSaveAndPoweroff = 0;
+			quick_save_and_poweroff();
+			mQuickSaveAndPoweroff = 0;
         }
 
 		emu_update_input();
@@ -1841,6 +1845,36 @@ void emu_loop(void)
 
 		if (!skip && flip_after_sync)
 			plat_video_flip();
+
+
+		/* FOR SEGA CD */
+		/* Leave some time for the bios to load before starting a quick load at boot */
+		/* (Sega CD doesn't quick load at boot otherwise) */
+		/* Should have a much cleaner implementation thant this fix */
+		if((PicoIn.AHW & PAHW_MCD) && frame_nb >= 100){
+
+			/* Load slot */
+			if(load_state_slot != -1){
+				printf("LOADING FROM SLOT (SEGA CD) %d...\n", load_state_slot+1);
+				char fname[1024];
+				emu_save_load_game(1, 0);
+				printf("LOADED FROM SLOT (SEGA CD) %d\n", load_state_slot+1);
+				load_state_slot = -1;
+			}
+			if(need_quick_load != -1){
+				load_state_file = quick_save_file;
+				need_quick_load = -1;
+			}
+			/* Load file */
+			if(load_state_file != NULL){
+				printf("LOADING FROM FILE (SEGA CD) %s...\n", load_state_file);
+				emu_save_load_game_from_file(1, load_state_file);
+				printf("LOADED FROM SLOT (SEGA CD) %s\n", load_state_file);
+				load_state_file = NULL;
+			}
+		}
+
+		frame_nb++;
 
 		pprof_end(main);
 	}
