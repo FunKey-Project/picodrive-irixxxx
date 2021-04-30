@@ -685,7 +685,8 @@ void emu_prep_defconfig(void)
 	defaultConfig.Frameskip = -1; // auto
 	defaultConfig.input_dev0 = PICO_INPUT_PAD_3BTN;
 	defaultConfig.input_dev1 = PICO_INPUT_PAD_3BTN;
-	defaultConfig.volume = 99;
+	defaultConfig.volume = 50;
+	//defaultConfig.volume = 99;
 	defaultConfig.gamma = 100;
 	defaultConfig.scaling = 0;
 	defaultConfig.turbo_rate = 15;
@@ -754,7 +755,7 @@ int emu_read_config(const char *rom_fname, int no_defaults)
 
 	// some sanity checks
 	if (currentConfig.volume < 0 || currentConfig.volume > 99)
-		currentConfig.volume = 99;
+		currentConfig.volume = 50;
 
 	if (ret == 0)
 		config_slot_current = config_slot;
