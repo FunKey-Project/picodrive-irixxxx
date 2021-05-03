@@ -91,6 +91,13 @@ static unsigned short *get_16bit_start(unsigned short *buf)
 
 void pemu_finalize_frame(const char *fps, const char *notice)
 {
+
+//#define FUNKEY_AUTHORIZE_TEXT_OVERLAY
+#ifndef FUNKEY_AUTHORIZE_TEXT_OVERLAY
+	return;
+#endif //FUNKEY_AUTHORIZE_TEXT_OVERLAY
+
+
 	if (!is_16bit_mode()) {
 		// convert the 8 bit CLUT output to 16 bit RGB
 		unsigned short *pd = (unsigned short *)g_screen_ptr +
@@ -172,6 +179,7 @@ void plat_status_msg_clear(void)
 
 void plat_status_msg_busy_next(const char *msg)
 {
+	printf("****** %s: %s\n", __func__, msg);
 	plat_status_msg_clear();
 	pemu_finalize_frame("", msg);
 	plat_video_flip();

@@ -1682,8 +1682,6 @@ void emu_loop(void)
 
 	fpsbuff[0] = 0;
 
-	printf("%s ------------------ \n", __func__);
-
 	PicoLoopPrepare();
 
 	plat_video_loop_prepare();
@@ -1744,6 +1742,19 @@ void emu_loop(void)
 		// second changed?
 		if (timestamp_x3 - timestamp_fps_x3 >= ms_to_ticks(1000) * 3)
 		{
+#define FUNKEY_RESYNCHRONIZE_AUDIO_SECS	(5*60)
+#ifdef FUNKEY_RESYNCHRONIZE_AUDIO_SECS
+			static unsigned int last_resync = 0, cur_sec=0;
+			if(cur_sec++ - last_resync >= FUNKEY_RESYNCHRONIZE_AUDIO_SECS){
+				last_resync = cur_sec;
+
+				/** Resync here (same as quitting ans relaunching loop for now) */
+				printf("Resync sound now\n");
+				emu_sound_stop();
+				pemu_sound_start();
+			}
+#endif //FUNKEY_RESYNCHRONIZE_AUDIO_SECS
+
 #ifdef BENCHMARK
 			static int bench = 0, bench_fps = 0, bench_fps_s = 0, bfp = 0, bf[4];
 			if (++bench == 10) {
@@ -1852,7 +1863,7 @@ void emu_loop(void)
 		/* Leave some time for the bios to load before starting a quick load at boot */
 		/* (Sega CD doesn't quick load at boot otherwise) */
 		/* Should have a much cleaner implementation thant this fix */
-		if((PicoIn.AHW & PAHW_MCD) && frame_nb >= 100){
+		if((PicoIn.AHW & PAHW_MCD) && frame_nb >= 120){
 
 			/* Load slot */
 			if(load_state_slot != -1){
