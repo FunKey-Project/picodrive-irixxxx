@@ -280,7 +280,7 @@ static const char *find_bios(int *region, const char *cd_fname)
 
 		/** Set notif for BIOS */
 	    char shell_cmd[400];
-	    sprintf(shell_cmd, "%s 0 \"    %s BIOS FILE MISSING^^Connect your FunKey S to ^your computer and copy the^BIOS file to the game folder^^The file can be called:^ - %s.bin^ - %s.bin^ - %s.bin^ - %s.bin^^For more instructions:^www.funkey-project.com^^Press any button to exit...\"",
+	    sprintf(shell_cmd, "%s 0 \"    %s BIOS FILE MISSING^^Connect your FunKey S to ^your computer and copy the^BIOS file in the folder:^    Sega Genesis/bios/^^The file can be called:^ - %s.bin^ - %s.bin^ - %s.bin^ - %s.bin^^For more instructions:^www.funkey-project.com^^Press any button to exit...\"",
 	            SHELL_CMD_NOTIF, country, bios_names[0], bios_names[1], bios_names[2], bios_names[3]);
 	    FILE *fp = popen(shell_cmd, "r");
 	    if (fp == NULL) {
