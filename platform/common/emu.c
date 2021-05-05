@@ -221,8 +221,25 @@ static const char *find_bios(int *region, const char *cd_fname)
 		if (f) break;
 	}
 
+	/** Check Bios files in <rom path>/bios */
 	if(!f){
-		/** Check Bios files in rom path */
+		for (i = 0; i < count; i++)
+		{
+			sprintf(static_buff, "%s/bios/%s", mRomPath, files[i]);
+			printf("static_buff: %s\n", static_buff);
+			strcat(static_buff, ".bin");
+			f = fopen(static_buff, "rb");
+			if (f) break;
+
+			static_buff[strlen(static_buff) - 4] = 0;
+			strcat(static_buff, ".zip");
+			f = fopen(static_buff, "rb");
+			if (f) break;
+		}
+	}
+
+	/** Check Bios files in rom path */
+	if(!f){
 		for (i = 0; i < count; i++)
 		{
 			sprintf(static_buff, "%s/%s", mRomPath, files[i]);
