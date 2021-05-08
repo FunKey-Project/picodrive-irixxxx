@@ -1576,6 +1576,7 @@ void plat_video_flip(void)
 		  prev_aspect_ratio = aspect_ratio;
 		  need_screen_cleared = 0;
 		}
+    uint16_t hres_max;
 
 		switch(aspect_ratio){
 		case ASPECT_RATIOS_TYPE_STRETCHED:
@@ -1595,18 +1596,23 @@ void plat_video_flip(void)
 			}
 			break;
 		case ASPECT_RATIOS_TYPE_MANUAL:
+      hres_max= MIN(RES_HW_SCREEN_VERTICAL, game_surface->h);
 			;uint32_t h_scaled = MIN(game_surface->h*RES_HW_SCREEN_HORIZONTAL/game_surface->w,
 						 RES_HW_SCREEN_VERTICAL);
-			uint32_t h_zoomed = MIN(h_scaled + aspect_ratio_factor_percent*(RES_HW_SCREEN_VERTICAL - h_scaled)/100,
+			uint32_t h_zoomed = MIN(h_scaled + aspect_ratio_factor_percent*(hres_max - h_scaled)/100,
 						RES_HW_SCREEN_VERTICAL);
 			flip_NNOptimized_LeftRightUpDownBilinear_Optimized8(game_surface, virtual_hw_screen,
 									    MAX(game_surface->w*h_zoomed/game_surface->h, RES_HW_SCREEN_HORIZONTAL),
 									    MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));
 			break;
 		case ASPECT_RATIOS_TYPE_CROPPED:
-			flip_NNOptimized_AllowOutOfScreen(game_surface, virtual_hw_screen,
+			/*flip_NNOptimized_AllowOutOfScreen(game_surface, virtual_hw_screen,
 							  MAX(game_surface->w*RES_HW_SCREEN_VERTICAL/game_surface->h, RES_HW_SCREEN_HORIZONTAL),
-							  RES_HW_SCREEN_VERTICAL);
+							  RES_HW_SCREEN_VERTICAL);*/
+        hres_max= MIN(RES_HW_SCREEN_VERTICAL, game_surface->h);
+        flip_NNOptimized_AllowOutOfScreen(game_surface, virtual_hw_screen,
+                MAX(game_surface->w*hres_max/game_surface->h, RES_HW_SCREEN_HORIZONTAL),
+                hres_max);
 			break;
 		case ASPECT_RATIOS_TYPE_SCALED:
 			flip_NNOptimized_LeftRightUpDownBilinear_Optimized8(game_surface, virtual_hw_screen,
