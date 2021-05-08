@@ -221,8 +221,25 @@ static const char *find_bios(int *region, const char *cd_fname)
 		if (f) break;
 	}
 
+	/** Check Bios files in <rom path>/bios */
 	if(!f){
-		/** Check Bios files in rom path */
+		for (i = 0; i < count; i++)
+		{
+			sprintf(static_buff, "%s/bios/%s", mRomPath, files[i]);
+			printf("static_buff: %s\n", static_buff);
+			strcat(static_buff, ".bin");
+			f = fopen(static_buff, "rb");
+			if (f) break;
+
+			static_buff[strlen(static_buff) - 4] = 0;
+			strcat(static_buff, ".zip");
+			f = fopen(static_buff, "rb");
+			if (f) break;
+		}
+	}
+
+	/** Check Bios files in rom path */
+	if(!f){
 		for (i = 0; i < count; i++)
 		{
 			sprintf(static_buff, "%s/%s", mRomPath, files[i]);
@@ -263,7 +280,7 @@ static const char *find_bios(int *region, const char *cd_fname)
 
 		/** Set notif for BIOS */
 	    char shell_cmd[400];
-	    sprintf(shell_cmd, "%s 0 \"    %s BIOS FILE MISSING^^Connect your FunKey S to ^your computer and copy the^BIOS file to the game folder^^The file can be called:^ - %s.bin^ - %s.bin^ - %s.bin^ - %s.bin^^For more instructions:^www.funkey-project.com^^Press any button to exit...\"",
+	    sprintf(shell_cmd, "%s 0 \"    %s BIOS FILE MISSING^^Connect your FunKey S to ^your computer and copy the^BIOS file in the folder:^    Sega Genesis/bios/^^The file can be called:^ - %s.bin^ - %s.bin^ - %s.bin^ - %s.bin^^For more instructions:^www.funkey-project.com^^Press any button to exit...\"",
 	            SHELL_CMD_NOTIF, country, bios_names[0], bios_names[1], bios_names[2], bios_names[3]);
 	    FILE *fp = popen(shell_cmd, "r");
 	    if (fp == NULL) {
@@ -685,7 +702,8 @@ void emu_prep_defconfig(void)
 	defaultConfig.Frameskip = -1; // auto
 	defaultConfig.input_dev0 = PICO_INPUT_PAD_3BTN;
 	defaultConfig.input_dev1 = PICO_INPUT_PAD_3BTN;
-	defaultConfig.volume = 99;
+	defaultConfig.volume = 50;
+	//defaultConfig.volume = 99;
 	defaultConfig.gamma = 100;
 	defaultConfig.scaling = 0;
 	defaultConfig.turbo_rate = 15;
@@ -754,7 +772,7 @@ int emu_read_config(const char *rom_fname, int no_defaults)
 
 	// some sanity checks
 	if (currentConfig.volume < 0 || currentConfig.volume > 99)
-		currentConfig.volume = 99;
+		currentConfig.volume = 50;
 
 	if (ret == 0)
 		config_slot_current = config_slot;
@@ -1681,8 +1699,6 @@ void emu_loop(void)
 
 	fpsbuff[0] = 0;
 
-	printf("%s ------------------ \n", __func__);
-
 	PicoLoopPrepare();
 
 	plat_video_loop_prepare();
@@ -1743,6 +1759,19 @@ void emu_loop(void)
 		// second changed?
 		if (timestamp_x3 - timestamp_fps_x3 >= ms_to_ticks(1000) * 3)
 		{
+#define FUNKEY_RESYNCHRONIZE_AUDIO_SECS	(5*60)
+#ifdef FUNKEY_RESYNCHRONIZE_AUDIO_SECS
+			static unsigned int last_resync = 0, cur_sec=0;
+			if(cur_sec++ - last_resync >= FUNKEY_RESYNCHRONIZE_AUDIO_SECS){
+				last_resync = cur_sec;
+
+				/** Resync here (same as quitting ans relaunching loop for now) */
+				printf("Resync sound now\n");
+				emu_sound_stop();
+				pemu_sound_start();
+			}
+#endif //FUNKEY_RESYNCHRONIZE_AUDIO_SECS
+
 #ifdef BENCHMARK
 			static int bench = 0, bench_fps = 0, bench_fps_s = 0, bfp = 0, bf[4];
 			if (++bench == 10) {
@@ -1851,7 +1880,7 @@ void emu_loop(void)
 		/* Leave some time for the bios to load before starting a quick load at boot */
 		/* (Sega CD doesn't quick load at boot otherwise) */
 		/* Should have a much cleaner implementation thant this fix */
-		if((PicoIn.AHW & PAHW_MCD) && frame_nb >= 100){
+		if((PicoIn.AHW & PAHW_MCD) && frame_nb >= 120){
 
 			/* Load slot */
 			if(load_state_slot != -1){
