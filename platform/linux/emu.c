@@ -92,11 +92,6 @@ static unsigned short *get_16bit_start(unsigned short *buf)
 void pemu_finalize_frame(const char *fps, const char *notice)
 {
 
-//#define FUNKEY_AUTHORIZE_TEXT_OVERLAY
-#ifndef FUNKEY_AUTHORIZE_TEXT_OVERLAY
-	return;
-#endif //FUNKEY_AUTHORIZE_TEXT_OVERLAY
-
 
 	if (!is_16bit_mode()) {
 		// convert the 8 bit CLUT output to 16 bit RGB
@@ -115,6 +110,11 @@ void pemu_finalize_frame(const char *fps, const char *notice)
 			ps += 320 - out_w;
 		}
 	}
+
+//#define FUNKEY_AUTHORIZE_TEXT_OVERLAY
+#ifndef FUNKEY_AUTHORIZE_TEXT_OVERLAY
+	return;
+#endif //FUNKEY_AUTHORIZE_TEXT_OVERLAY
 
 	if (notice)
 		emu_osd_text16(4, g_screen_height - 8, notice);
