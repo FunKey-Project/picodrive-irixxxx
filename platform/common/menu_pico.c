@@ -711,7 +711,7 @@ void run_menu_loop()
             RES_HW_SCREEN_HORIZONTAL * RES_HW_SCREEN_VERTICAL * sizeof(uint16_t));
 
     /* Stop Ampli */
-    system(SHELL_CMD_TURN_AMPLI_OFF);
+    system(SHELL_CMD_AUDIO_AMP_OFF);
 
     /// ------ Wait for menu UP key event ------
     int actions[IN_BINDTYPE_COUNT] = { 0, };
@@ -1085,7 +1085,7 @@ void run_menu_loop()
     }
 
     /* Start Ampli */
-    system(SHELL_CMD_TURN_AMPLI_ON);
+    system(SHELL_CMD_AUDIO_AMP_ON);
 
     /// ------ Reset last screen ------
     SDL_BlitSurface(backup_hw_screen, NULL, hw_screen, NULL);
@@ -1117,7 +1117,7 @@ int launch_resume_menu_loop()
     int option_idx=RESUME_YES;
 
     /* Stop Ampli */
-    system(SHELL_CMD_TURN_AMPLI_OFF);
+    system(SHELL_CMD_AUDIO_AMP_OFF);
 
     /* Save prev key repeat params and set new Key repeat */
     SDL_GetKeyRepeat(&backup_key_repeat_delay, &backup_key_repeat_interval);
@@ -1286,7 +1286,7 @@ int launch_resume_menu_loop()
     }
 
     /* Start Ampli */
-    system(SHELL_CMD_TURN_AMPLI_ON);
+    system(SHELL_CMD_AUDIO_AMP_ON);
 
     return option_idx;
 }
