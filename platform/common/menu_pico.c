@@ -84,8 +84,7 @@ static const char *men_dummy[] = { NULL };
 #elif defined(PANDORA)
 #include <platform/pandora/menu.c>
 #else
-#define MENU_OPTIONS_GFX
-#define MENU_OPTIONS_ADV
+#include <platform/linux/menu.c>
 #endif
 
 
