@@ -177,21 +177,21 @@ m16_32_s2_no_unal2:
 
 @ filter out DC offset
 @ in=int_sample (max 20 bit), y=filter memory, r8=tmp
-.macro DCfilt in y
-    rsb     r8, \y, \in, lsl #12	@ fixpoint 20.12
-    add     \y, \y, r8, asr #12		@ alpha = 1-1/4094
-    sub     \in, \in, \y, asr #12
-.endm
+@.macro DCfilt in y
+@    rsb     r8, \y, \in, lsl #12	@ fixpoint 20.12
+@    add     \y, \y, r8, asr #12		@ alpha = 1-1/4094
+@    sub     \in, \in, \y, asr #12
+@.endm
 
 @ lowpass filter
 @ in=int_sample (max 20 bit), y=filter memory, r12=alpha(Q8), r8=tmp
-.macro LPfilt in y
+@.macro LPfilt in y
 @    asr     r8, \y, #8
 @    rsb     r8, r8, \in, lsl #4		@ fixpoint 20.12
-    sub     r8, \in, \y, asr #12		@ fixpoint 20.12
-    mla     \y, r8, r12, \y
-    asr     \in, \y, #12
-.endm
+@    sub     r8, \in, \y, asr #12		@ fixpoint 20.12
+@    mla     \y, r8, r12, \y
+@    asr     \in, \y, #12
+@.endm
 
 
 @ mix 32bit audio (with 16bits really used, upper bits indicate overflow) with normal 16 bit audio with left channel only
@@ -220,14 +220,14 @@ m32_16l_st_loop:
     add     r6, r6, r12,asr #16
     add     r7, r7, r12,asr #16
     ldr     r12,[sp]
-    LPfilt  r4, r3
-    LPfilt  r5, lr
-    LPfilt  r6, r3
-    LPfilt  r7, lr
-    DCfilt  r4, r10
-    DCfilt  r5, r11
-    DCfilt  r6, r10
-    DCfilt  r7, r11
+@   LPfilt  r4, r3
+@   LPfilt  r5, lr
+@   LPfilt  r6, r3
+@   LPfilt  r7, lr
+@   DCfilt  r4, r10
+@   DCfilt  r5, r11
+@   DCfilt  r6, r10
+@   DCfilt  r7, r11
     mov     r12,#1
     Limitsh r4
     Limitsh r5
@@ -248,10 +248,10 @@ m32_16l_st_end:
     add     r4, r4, r6
     add     r5, r5, r6
     ldr     r12,[sp]
-    LPfilt  r4, r3
-    LPfilt  r5, lr
-    DCfilt  r4, r10
-    DCfilt  r5, r11
+@   LPfilt  r4, r3
+@   LPfilt  r5, lr
+@   DCfilt  r4, r10
+@   DCfilt  r5, r11
     mov     r12,#1
     Limitsh r4
     Limitsh r5
@@ -286,8 +286,8 @@ mix_32_to_16_mono:
     sub     r2, r2, #1
     add     r4, r4, r5
     ldr     r12,[sp]
-    LPfilt  r4, r11
-    DCfilt  r4, r10
+@   LPfilt  r4, r11
+@   DCfilt  r4, r10
     mov     r12,#1
     Limit   r4
     strh    r4, [r0], #2
@@ -306,14 +306,14 @@ m32_16_mo_loop:
     mov     r12,r12,lsl #16
     add     r6, r6, r12,asr #16
     ldr     r12,[sp]
-    LPfilt  r4, r11
-    LPfilt  r5, r11
-    LPfilt  r6, r11
-    LPfilt  r7, r11
-    DCfilt  r4, r10
-    DCfilt  r5, r10
-    DCfilt  r6, r10
-    DCfilt  r7, r10
+@   LPfilt  r4, r11
+@   LPfilt  r5, r11
+@   LPfilt  r6, r11
+@   LPfilt  r7, r11
+@   DCfilt  r4, r10
+@   DCfilt  r5, r10
+@   DCfilt  r6, r10
+@   DCfilt  r7, r10
     mov     r12,#1
     Limitsh r4
     Limitsh r5
@@ -335,10 +335,10 @@ m32_16_mo_end:
     mov     r6, r6, lsl #16
     add     r4, r4, r6, asr #16
     ldr     r12,[sp]
-    LPfilt  r4, r11
-    LPfilt  r5, r11
-    DCfilt  r4, r10
-    DCfilt  r5, r10
+@   LPfilt  r4, r11
+@   LPfilt  r5, r11
+@   DCfilt  r4, r10
+@   DCfilt  r5, r10
     mov     r12,#1
     Limitsh r4
     Limitsh r5
@@ -352,8 +352,8 @@ m32_16_mo_no_unal2:
     ldr     r4, [r1], #4
     add     r4, r4, r5
     ldr     r12,[sp]
-    LPfilt  r4, r11
-    DCfilt  r4, r10
+@   LPfilt  r4, r11
+@   DCfilt  r4, r10
     mov     r12,#1
     Limit   r4
     strh    r4, [r0], #2
@@ -411,14 +411,14 @@ m32_16l_st_l_loop:
     mov     r6, r6, asr r9
     mov     r7, r7, asr r9
     ldr     r12,[sp]
-    LPfilt  r4, r3
-    LPfilt  r5, lr
-    LPfilt  r6, r3
-    LPfilt  r7, lr
-    DCfilt  r4, r10
-    DCfilt  r5, r11
-    DCfilt  r6, r10
-    DCfilt  r7, r11
+@   LPfilt  r4, r3
+@   LPfilt  r5, lr
+@   LPfilt  r6, r3
+@   LPfilt  r7, lr
+@   DCfilt  r4, r10
+@   DCfilt  r5, r11
+@   DCfilt  r6, r10
+@   DCfilt  r7, r11
     mov     r12,#1
     Limitsh r4
     Limitsh r5
@@ -441,10 +441,10 @@ m32_16l_st_l_end:
     mov     r4, r4, asr r9
     mov     r5, r5, asr r9
     ldr     r12,[sp]
-    LPfilt  r4, r3
-    LPfilt  r5, lr
-    DCfilt  r4, r10
-    DCfilt  r5, r11
+@   LPfilt  r4, r3
+@   LPfilt  r5, lr
+@   DCfilt  r4, r10
+@   DCfilt  r5, r11
     mov     r12,#1
     Limitsh r4
     Limitsh r5
