@@ -687,8 +687,8 @@ void emu_prep_defconfig(void)
 {
 	memset(&defaultConfig, 0, sizeof(defaultConfig));
 	defaultConfig.EmuOpt    = EOPT_EN_SRAM | EOPT_EN_SOUND | EOPT_16BPP |
-				  EOPT_EN_CD_LEDS | EOPT_GZIP_SAVES | 0x10/*?*/;
-	defaultConfig.s_PicoOpt = POPT_EN_STEREO|POPT_EN_FM|POPT_EN_PSG|POPT_EN_Z80 |
+				  EOPT_GZIP_SAVES | 0x10/*?*/;
+	defaultConfig.s_PicoOpt = POPT_EN_YM2413|POPT_EN_STEREO|POPT_EN_FM|POPT_EN_PSG|POPT_EN_Z80 |
 				  POPT_EN_MCD_PCM|POPT_EN_MCD_CDDA|POPT_EN_MCD_GFX |
 				  POPT_EN_DRC|POPT_ACC_SPRITES |
 				  POPT_EN_32X|POPT_EN_PWM;
@@ -1687,7 +1687,7 @@ static void emu_loop_prep(void)
 void emu_loop(void)
 {
 	int frames_done, frames_shown;	/* actual frames for fps counter */
-	int frame_nb = 0;	
+	int frame_nb = 0;
 	int target_frametime_x3;
 	unsigned int timestamp_x3 = 0;
 	unsigned int timestamp_aim_x3 = 0;
