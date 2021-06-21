@@ -2,7 +2,7 @@
  * PicoDrive
  * (c) Copyright Dave, 2004
  * (C) notaz, 2006-2009
- * (C) kub, 2020
+ * (C) kub, 2020,2021
  *
  * This work is licensed under the terms of MAME license.
  * See COPYING file in the top-level directory.
@@ -12,11 +12,131 @@
 #define NEED_DMA_SOURCE
 #include "memory.h"
 
-extern const unsigned char  hcounts_32[], hcounts_40[];
-extern const unsigned char  vdpcyc2sl_32_bl[], vdpcyc2sl_40_bl[];
-extern const unsigned char  vdpcyc2sl_32[], vdpcyc2sl_40[];
-extern const unsigned short vdpsl2cyc_32_bl[], vdpsl2cyc_40_bl[];
-extern const unsigned short vdpsl2cyc_32[], vdpsl2cyc_40[];
+
+enum { clkdiv = 2 };    // CPU clock granularity: one of 1,2,4,8
+
+// VDP Slot timing, taken from http://gendev.spritesmind.net/
+//     forum/viewtopic.php?f=22&t=851&sid=d5701a71396ee7f700c74fb7cd85cb09
+// Thank you very much for the great work, Nemesis!
+
+// Slot clock is sysclock/20 for h32 and sysclock/16 for h40.
+// One scanline is 63.7us/63.5us (h32/h40) long which is 488.6/487.4 68k cycles.
+// Assume 488 for everything.
+// 1 slot is 488/171 = 2.8538 68k cycles in h32, and 488/210 = 2.3238 in h40.
+enum { slcpu = 488 };
+
+// VDP has a slot counter running from 0x00 to 0xff every scanline, but it has
+// a gap depending on the video mode. The slot in which a horizontal interrupt
+// is generated also depends on the video mode.
+enum { hint32 = 0x85, gapstart32 = 0x94, gapend32 = 0xe9};
+enum { hint40 = 0xa5, gapstart40 = 0xb7, gapend40 = 0xe5};
+
+// The horizontal sync period (HBLANK) is 30/37 slots (h32/h40):
+// h32: 4 slots front porch (1.49us), 13 HSYNC (4.84us), 13 back porch (4.84us)
+// h40: 5 slots front porch (1.49us), 16 HSYNC (4.77us), 16 back porch (4.77us)
+// HBLANK starts in slot 0x93/0xb4, according to Nemesis' measurements.
+enum { hboff32 = 0x93-hint32, hblen32 = 0xf8-(gapend32-gapstart32)-hint32};//30
+enum { hboff40 = 0xb4-hint40, hblen40 = 0xf8-(gapend40-gapstart40)-hint40};//37
+
+// number of slots in a scanline
+#define slots32	(0x100-(gapend32-gapstart32)) // 171
+#define slots40	(0x100-(gapend40-gapstart40)) // 210
+
+// In blanked display, all slots but the refresh slots are usable for transfers,
+// in active display only 16(h32) / 18(h40) slots can be used.
+
+// dma and refresh slots for active display, 16 for H32
+static u8 dmaslots32[] =
+    { 145,243, 2,10,18, 34,42,50, 66,74,82, 98,106,114, 129,130 };
+static u8 refslots32[] =
+    {        250,     26,       58,       90,         122 };
+// dma and refresh slots for active display, 18 for H40
+static u8 dmaslots40[] =
+    {     232, 2,10,18, 34,42,50, 66,74,82, 98,106,114, 130,138,146, 161,162 };
+static u8 refslots40[] =
+    {        250,     26,       58,       90,         122,         154 };
+
+// table sizes
+enum { cycsz = slcpu/clkdiv };
+enum { sl32blsz=slots32-sizeof(refslots32)+1, sl32acsz=sizeof(dmaslots32)+1 };
+enum { sl40blsz=slots40-sizeof(refslots40)+1, sl40acsz=sizeof(dmaslots40)+1 };
+
+// Tables must be considerably larger than one scanline, since 68k emulation
+// isn't stopping in the middle of an operation. If the last op is a 32 bit
+// VDP access 2 slots may need to be taken from the next scanline, which can be
+// more than 100 CPU cycles. For safety just cover 2 scanlines.
+
+// table for hvcounter mapping. check: Sonic 3D Blast bonus, Cannon Fodder,
+// Chase HQ II, 3 Ninjas kick back, Road Rash 3, Skitchin', Wheel of Fortune
+static u8  hcounts_32[2*cycsz], hcounts_40[2*cycsz];
+// tables mapping cycles to slots
+static u16 vdpcyc2sl_32_bl[2*cycsz],vdpcyc2sl_40_bl[2*cycsz];
+static u16 vdpcyc2sl_32_ac[2*cycsz],vdpcyc2sl_40_ac[2*cycsz];
+// tables mapping slots to cycles
+// NB the sl2cyc tables must cover all slots present in the cyc2sl tables.
+static u16 vdpsl2cyc_32_bl[2*sl32blsz],vdpsl2cyc_40_bl[2*sl40blsz];
+static u16 vdpsl2cyc_32_ac[2*sl32acsz],vdpsl2cyc_40_ac[2*sl40acsz];
+
+
+// calculate timing tables for one mode (H32 or H40)
+// NB tables aligned to HINT, since the main loop uses HINT as synchronization
+#define INITTABLES(s) { \
+  float factor = (float)slcpu/slots##s;					\
+  int ax, bx, rx, ac, bc;						\
+  int i, n;								\
+									\
+  /* calculate internal VDP slot numbers */				\
+  for (i = 0; i < cycsz; i++) {						\
+    n = hint##s + i*clkdiv/factor;					\
+    if (n >= gapstart##s) n += gapend##s-gapstart##s;			\
+    hcounts_##s[i] = n % 256;						\
+  }									\
+									\
+  ax = bx = ac = bc = rx = 0;						\
+  for (i = 0; i < cycsz; i++) {						\
+    n = hcounts_##s[i];							\
+    if (i == 0 || n != hcounts_##s[i-1]) {				\
+      /* fill slt <=> cycle tables, active scanline */			\
+      if (ax < ARRAY_SIZE(dmaslots##s) && dmaslots##s[ax] == n) {	\
+        vdpsl2cyc_##s##_ac[++ax]=i;					\
+        while (ac < i) vdpcyc2sl_##s##_ac[ac++] = ax-1;			\
+      }									\
+      /* fill slt <=> cycle tables, scanline off */			\
+      if (rx >= ARRAY_SIZE(refslots##s) || refslots##s[rx] != n) {	\
+        vdpsl2cyc_##s##_bl[++bx]=i;					\
+        while (bc < i) vdpcyc2sl_##s##_bl[bc++] = bx-1;			\
+      } else								\
+        ++rx;								\
+    }									\
+  }									\
+  /* fill up cycle to slot mappings for last slot */			\
+  while (ac < cycsz)							\
+    vdpcyc2sl_##s##_ac[ac] = ARRAY_SIZE(dmaslots##s),		ac++;	\
+  while (bc < cycsz)							\
+    vdpcyc2sl_##s##_bl[bc] = slots##s-ARRAY_SIZE(refslots##s),	bc++;	\
+									\
+  /* extend tables for 2nd scanline */					\
+  memcpy(hcounts_##s+cycsz, hcounts_##s, ARRAY_SIZE(hcounts_##s)-cycsz);\
+  i = ARRAY_SIZE(dmaslots##s);						\
+  while (ac < ARRAY_SIZE(vdpcyc2sl_##s##_ac))				\
+    vdpcyc2sl_##s##_ac[ac] = vdpcyc2sl_##s##_ac[ac-cycsz]+i,	ac++;	\
+  while (ax < ARRAY_SIZE(vdpsl2cyc_##s##_ac)-1)			ax++,	\
+    vdpsl2cyc_##s##_ac[ax] = vdpsl2cyc_##s##_ac[ax-i]+cycsz;		\
+  i = slots##s - ARRAY_SIZE(refslots##s);				\
+  while (bc < ARRAY_SIZE(vdpcyc2sl_##s##_bl))				\
+    vdpcyc2sl_##s##_bl[bc] = vdpcyc2sl_##s##_bl[bc-cycsz]+i,	bc++;	\
+  while (bx < ARRAY_SIZE(vdpsl2cyc_##s##_bl)-1)			bx++,	\
+    vdpsl2cyc_##s##_bl[bx] = vdpsl2cyc_##s##_bl[bx-i]+cycsz;		\
+}
+ 
+
+// initialize VDP timing tables
+void PicoVideoInit(void)
+{
+  INITTABLES(32);
+  INITTABLES(40);
+}
+
 
 static int blankline;           // display disabled for this line
 
@@ -69,16 +189,17 @@ static struct VdpFIFO { // XXX this must go into save file!
   unsigned short fifo_slot;   // last executed slot in current scanline
   unsigned short fifo_maxslot;// #slots in scanline
 
-  const unsigned char *fifo_cyc2sl;
+  const unsigned short *fifo_cyc2sl;
   const unsigned short *fifo_sl2cyc;
 } VdpFIFO;
 
 enum { FQ_BYTE = 1, FQ_BGDMA = 2, FQ_FGDMA = 4 }; // queue flags, NB: BYTE = 1!
 
-// NB must limit cyc2sl to table size in case 68k overdraws its aim. That can
-// happen if the last insn is a blocking acess to VDP, or for exceptions (e.g.irq)
-#define	Cyc2Sl(vf,lc)	((lc) < 256*2 ? vf->fifo_cyc2sl[(lc)>>1] : vf->fifo_cyc2sl[255])
-#define Sl2Cyc(vf,sl)   (vf->fifo_sl2cyc[sl]*2)
+
+// NB should limit cyc2sl to table size in case 68k overdraws its aim. That can
+// happen if the last op is a blocking acess to VDP, or for exceptions (e.g.irq)
+#define	Cyc2Sl(vf,lc)	(vf->fifo_cyc2sl[(lc)/clkdiv])
+#define Sl2Cyc(vf,sl)   (vf->fifo_sl2cyc[sl]*clkdiv)
 
 // do the FIFO math
 static __inline int AdvanceFIFOEntry(struct VdpFIFO *vf, struct PicoVideo *pv, int slots)
@@ -90,7 +211,8 @@ static __inline int AdvanceFIFOEntry(struct VdpFIFO *vf, struct PicoVideo *pv, i
   if (l > cnt)
     l = cnt;
   if (!(vf->fifo_queue[vf->fifo_qx] & FQ_BGDMA))
-    if ((vf->fifo_total -= ((cnt & b) + l) >> b) < 0) vf->fifo_total = 0;
+    vf->fifo_total -= ((cnt & b) + l) >> b;
+  if (vf->fifo_total < 0) vf->fifo_total = 0;
   cnt -= l;
 
   // if entry has been processed...
@@ -263,7 +385,7 @@ int PicoVideoFIFOWrite(int count, int flags, unsigned sr_mask,unsigned sr_flags)
 
     // update FIFO state if it was empty
     if (!(pv->status & PVS_FIFORUN)) {
-      vf->fifo_slot = Cyc2Sl(vf, lc+9); // FIFO latency ~3 vdp slots
+      vf->fifo_slot = Cyc2Sl(vf, lc+7); // FIFO latency ~3 vdp slots
       pv->status |= PVS_FIFORUN;
       pv->fifo_cnt = count << (flags & FQ_BYTE);
     }
@@ -300,10 +422,10 @@ int PicoVideoFIFOHint(void)
 // switch FIFO mode between active/inactive display
 void PicoVideoFIFOMode(int active, int h40)
 {
-  static const unsigned char *vdpcyc2sl[2][2] =
-        { {vdpcyc2sl_32_bl, vdpcyc2sl_40_bl} , {vdpcyc2sl_32, vdpcyc2sl_40} };
+  static const unsigned short *vdpcyc2sl[2][2] =
+      { {vdpcyc2sl_32_bl, vdpcyc2sl_40_bl},{vdpcyc2sl_32_ac, vdpcyc2sl_40_ac} };
   static const unsigned short *vdpsl2cyc[2][2] =
-        { {vdpsl2cyc_32_bl, vdpsl2cyc_40_bl} , {vdpsl2cyc_32, vdpsl2cyc_40} };
+      { {vdpsl2cyc_32_bl, vdpsl2cyc_40_bl},{vdpsl2cyc_32_ac, vdpsl2cyc_40_ac} };
 
   struct VdpFIFO *vf = &VdpFIFO;
   struct PicoVideo *pv = &Pico.video;
@@ -316,10 +438,9 @@ void PicoVideoFIFOMode(int active, int h40)
   vf->fifo_cyc2sl = vdpcyc2sl[active][h40];
   vf->fifo_sl2cyc = vdpsl2cyc[active][h40];
   // recalculate FIFO slot for new mode
-  vf->fifo_slot = Cyc2Sl(vf, lc)-1;
+  vf->fifo_slot = Cyc2Sl(vf, lc);
   vf->fifo_maxslot = Cyc2Sl(vf, 488);
 }
-
 
 // VDP memory rd/wr
 
@@ -722,8 +843,8 @@ PICO_INTERNAL_ASM void PicoVideoWrite(u32 a,unsigned short d)
   case 0x00: // Data port 0 or 2
     // try avoiding the sync..
     if (Pico.m.scanline < (pvid->reg[1]&0x08 ? 240 : 224) && (pvid->reg[1]&0x40) &&
-        !(!pvid->pending &&
-          ((pvid->command & 0xc00000f0) == 0x40000010 && PicoMem.vsram[pvid->addr>>1] == (d & 0x7ff)))
+        !(!pvid->pending && ((pvid->command & 0xc00000f0) == 0x40000010 &&
+                        PicoMem.vsram[(pvid->addr>>1) & 0x3f] == (d & 0x7ff)))
        )
       DrawSync(0); // XXX  it's unclear when vscroll data is fetched from vsram?
 
@@ -881,10 +1002,10 @@ update_irq:
 
 static u32 VideoSr(const struct PicoVideo *pv)
 {
-  unsigned int hp = pv->reg[12]&1 ? 15*488/210+1 : 15*488/171+1; // HBLANK start
-  unsigned int hl = pv->reg[12]&1 ? 37*488/210+1 : 28*488/171+1; // HBLANK len
+  unsigned int hp = pv->reg[12]&1 ? hboff40*488/slots40 : hboff32*488/slots32;
+  unsigned int hl = pv->reg[12]&1 ? hblen40*488/slots40 : hblen32*488/slots32;
   unsigned int c;
-  u32 d = pv->status;
+  u32 d = (u16)pv->status;
 
   c = SekCyclesDone() - Pico.t.m68c_line_start;
   if (c - hp < hl)
@@ -914,32 +1035,17 @@ PICO_INTERNAL_ASM u32 PicoVideoRead(u32 a)
     return d;
   }
 
-  // H-counter info (based on Generator):
-  // frame:
-  //                       |       <- hblank? ->      |
-  // start    <416>       hint  <36> hdisplay <38>  end // CPU cycles
-  // |---------...---------|------------|-------------|
-  // 0                   B6 E4                       FF // 40 cells
-  // 0                   93 E8                       FF // 32 cells
-
-  // Gens (?)              v-render
-  // start  <hblank=84>   hint    hdisplay <404>      |
-  // |---------------------|--------------------------|
-  // E4  (hc[0x43]==0)    07                         B1 // 40
-  // E8  (hc[0x45]==0)    05                         91 // 32
-
-  // check: Sonic 3D Blast bonus, Cannon Fodder, Chase HQ II, 3 Ninjas kick back, Road Rash 3, Skitchin', Wheel of Fortune
   if ((a&0x1c)==0x08)
   {
     unsigned int c;
     u32 d;
 
-    c = (SekCyclesDone() - Pico.t.m68c_line_start) & 0x1ff; // FIXME
+    c = SekCyclesDone() - Pico.t.m68c_line_start;
     if (Pico.video.reg[0]&2)
          d = Pico.video.hv_latch;
     else if (Pico.video.reg[12]&1)
-         d = hcounts_40[c/2] | (Pico.video.v_counter << 8);
-    else d = hcounts_32[c/2] | (Pico.video.v_counter << 8);
+         d = hcounts_40[c/clkdiv] | (Pico.video.v_counter << 8);
+    else d = hcounts_32[c/clkdiv] | (Pico.video.v_counter << 8);
 
     elprintf(EL_HVCNT, "hv: %02x %02x [%u] @ %06x", d, Pico.video.v_counter, SekCyclesDone(), SekPc);
     return d;
@@ -996,12 +1102,12 @@ unsigned char PicoVideoRead8HV_H(int is_from_z80)
 // FIXME: broken
 unsigned char PicoVideoRead8HV_L(int is_from_z80)
 {
-  u32 d = (SekCyclesDone() - Pico.t.m68c_line_start) & 0x1ff; // FIXME
+  u32 d = SekCyclesDone() - Pico.t.m68c_line_start;
   if (Pico.video.reg[0]&2)
        d = Pico.video.hv_latch;
   else if (Pico.video.reg[12]&1)
-       d = hcounts_40[d/2];
-  else d = hcounts_32[d/2];
+       d = hcounts_40[d/clkdiv];
+  else d = hcounts_32[d/clkdiv];
   elprintf(EL_HVCNT, "hcounter: %02x [%u] @ %06x", d, SekCyclesDone(), SekPc);
   return d;
 }

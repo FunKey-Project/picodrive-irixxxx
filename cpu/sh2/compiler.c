@@ -203,19 +203,35 @@ static char sh2dasm_buff[64];
 		(ulong)(sh2)->poll_addr, (sh2)->poll_cycles, (sh2)->poll_cnt); \
 }
 
-#if (DRC_DEBUG & (8|256|512|1024)) || defined(PDB)
 #if (DRC_DEBUG & (256|512|1024))
 static SH2 csh2[2][8];
 static FILE *trace[2];
 static int topen[2];
 #endif
+#if (DRC_DEBUG & 8)
+static u32 lastpc, lastcnt;
+static void *lastblock;
+#endif
+#if (DRC_DEBUG & (8|256|512|1024)) || defined(PDB)
 static void REGPARM(3) *sh2_drc_log_entry(void *block, SH2 *sh2, u32 sr)
 {
   if (block != NULL) {
-    dbg(8, "= %csh2 enter %08x %p, c=%d", sh2->is_slave ? 's' : 'm',
-      sh2->pc, block, (signed int)sr >> 12);
 #if defined PDB
+    dbg(8, "= %csh2 enter %08x %p, c=%d", sh2->is_slave?'s':'m',
+      sh2->pc, block, (signed int)sr >> 12);
     pdb_step(sh2, sh2->pc);
+#elif (DRC_DEBUG & 8)
+    if (lastpc != sh2->pc) {
+      if (lastcnt)
+        dbg(8, "= %csh2 enter %08x %p (%d times), c=%d", sh2->is_slave?'s':'m',
+          lastpc, lastblock, lastcnt, (signed int)sr >> 12);
+      dbg(8, "= %csh2 enter %08x %p, c=%d", sh2->is_slave?'s':'m',
+        sh2->pc, block, (signed int)sr >> 12);
+      lastpc = sh2->pc;
+      lastblock = block;
+      lastcnt = 0;
+    } else
+      lastcnt++;
 #elif (DRC_DEBUG & 256)
   {
     static SH2 fsh2;
@@ -468,7 +484,7 @@ static void rcache_free_tmp(int hr);
 #include "../drc/emit_mips.c"
 #elif defined(__riscv__) || defined(__riscv)
 #include "../drc/emit_riscv.c"
-#elif defined(__powerpc__) || defined(_M_PPC)
+#elif defined(__powerpc__) || defined(__ppc__) || defined(_M_PPC)
 #include "../drc/emit_ppc.c"
 #elif defined(__i386__) || defined(_M_X86)
 #include "../drc/emit_x86.c"
@@ -747,6 +763,7 @@ static void rm_from_hashlist(struct block_entry *be, int tcache_id)
 }
 
 
+#if LINK_BRANCHES
 static void add_to_hashlist_unresolved(struct block_link *bl, int tcache_id)
 {
   u32 tcmask = HASH_TABLE_SIZE(tcache_id) - 1;
@@ -789,7 +806,6 @@ static void rm_from_hashlist_unresolved(struct block_link *bl, int tcache_id)
     bl->next->prev = bl->prev;
 }
 
-#if LINK_BRANCHES
 static void dr_block_link(struct block_entry *be, struct block_link *bl, int emit_jump)
 {
   dbg(2, "- %slink from %p to pc %08x entry %p", emit_jump ? "":"early ",
@@ -1017,23 +1033,23 @@ static void dr_rm_block_entry(struct block_desc *bd, int tcache_id, u32 nolit, i
     return;
   }
 
-#if LINK_BRANCHES
   // remove from hash table, make incoming links unresolved
   if (bd->active) {
     for (i = 0; i < bd->entry_count; i++) {
       rm_from_hashlist(&bd->entryp[i], tcache_id);
 
+#if LINK_BRANCHES
       while ((bl = bd->entryp[i].links) != NULL) {
         dr_block_unlink(bl, 1);
         add_to_hashlist_unresolved(bl, tcache_id);
       }
+#endif
     }
 
     dr_mark_memory(-1, bd, tcache_id, nolit);
     add_to_block_list(&inactive_blocks[tcache_id], bd);
   }
   bd->active = 0;
-#endif
 
   if (free) {
 #if LINK_BRANCHES
@@ -1053,7 +1069,6 @@ static void dr_rm_block_entry(struct block_desc *bd, int tcache_id, u32 nolit, i
     rm_from_block_lists(bd);
     bd->addr = bd->size = bd->addr_lit = bd->size_lit = 0;
     bd->entry_count = 0;
-    bd->entryp = NULL;
   }
   emith_update_cache();
 }
@@ -1339,6 +1354,7 @@ static void rcache_add_vreg_alias(int x, sh2_reg_e r);
 static void rcache_remove_vreg_alias(int x, sh2_reg_e r);
 static void rcache_evict_vreg(int x);
 static void rcache_remap_vreg(int x);
+static int rcache_get_reg(sh2_reg_e r, rc_gr_mode mode, int *hr);
 
 static void rcache_set_x16(int hr, int s16_, int u16_)
 {
@@ -1444,7 +1460,6 @@ static int rcache_is_u16(int hr)
   } */ \
 }
 
-#if PROPAGATE_CONSTANTS
 static inline int gconst_alloc(sh2_reg_e r)
 {
   int i, n = -1;
@@ -1481,7 +1496,6 @@ static void gconst_new(sh2_reg_e r, u32 val)
   if (guest_regs[r].vreg >= 0)
     rcache_remove_vreg_alias(guest_regs[r].vreg, r);
 }
-#endif
 
 static int gconst_get(sh2_reg_e r, u32 *val)
 {
@@ -2598,8 +2612,8 @@ static uptr split_address(uptr la, uptr mask, s32 *offs)
   uptr sign = (mask>>1) + 1; // sign bit in offset
   *offs = (la & mask) | (la & sign ? ~mask : 0); // offset part, sign extended
   la = (la & ~mask) + ((la & sign) << 1); // base part, corrected for offs sign
-  if (~mask && la == ~mask && !(*offs & sign)) { // special case la=-1 & offs>0
-    *offs = -*offs;
+  if (~mask && la == ~mask && *offs > 0) { // special case la=-1&~mask && offs>0
+    *offs -= mask+1;
     la = 0;
   }
   return la;
@@ -2661,6 +2675,11 @@ static int emit_get_rbase_and_offs(SH2 *sh2, sh2_reg_e r, int rmode, s32 *offs)
   } else {
     // known fixed host address
     la = split_address(la + ((a + *offs) & mask), omask, offs);
+    if (la == 0) {
+      // offset only. optimize for hosts having short indexed addressing
+      la = *offs & ~0x7f;  // keep the lower bits for endianess handling
+      *offs &= 0x7f;
+    }
     hr = rcache_get_tmp();
     emith_move_r_ptr_imm(hr, la);
   }
@@ -3014,12 +3033,22 @@ static void emit_do_static_regs(int is_write, int tmpr)
 // divide operation replacement functions, called by compiled code. Only the
 // 32:16 cases and the 64:32 cases described in the SH2 prog man are replaced.
 
-static uint32_t REGPARM(2) sh2_drc_divu32(uint32_t dv, uint32_t ds)
+// This is surprisingly difficult since the SH2 division operation is generating
+// the result in the dividend during the operation, leaving some remainder-like
+// stuff in the bits unused for the result, and leaving the T and Q status bits
+// in a state depending on the operands and the result. Q always reflects the
+// last result bit generated (i.e. bit 0 of the result). For T:
+//	32:16	T = top bit of the 16 bit remainder-like
+//	64:32	T = resulting T of the DIV0U/S operation
+// The remainder-like depends on outcome of the last generated result bit.
+
+static uint32_t REGPARM(3) sh2_drc_divu32(uint32_t dv, uint32_t *dt, uint32_t ds)
 {
-  if (ds && ds >= dv) {
-    // good case: no divide by 0, and no result overflow
+  if (ds > dv && (uint16_t)ds == 0) {
+    // good case: no overflow, divisor not 0, lower 16 bits 0
     uint32_t quot = dv / (ds>>16), rem = dv - (quot * (ds>>16));
     if (~quot&1) rem -= ds>>16;
+    *dt = (rem>>15) & 1;
     return (uint16_t)quot | ((2*rem + (quot>>31)) << 16);
   } else {
     // bad case: use the sh2 algo to get the right result
@@ -3029,20 +3058,21 @@ static uint32_t REGPARM(2) sh2_drc_divu32(uint32_t dv, uint32_t ds)
       dv = (dv<<1) | t;
       t = v;
       v = dv;
-      if (q)  dv += ds, q =   dv < v;
-      else    dv -= ds, q = !(dv < v);
+      if (q)  dv += ds, q = dv < v;
+      else    dv -= ds, q = dv > v;
       q ^= t, t = !q;
     }
+    *dt = dv>>31;
     return (dv<<1) | t;
   }
 }
 
 static uint32_t REGPARM(3) sh2_drc_divu64(uint32_t dh, uint32_t *dl, uint32_t ds)
 {
-  if (ds > 1 && ds >= dh) {
-    // good case: no divide by 0, and no result overflow
+  if (ds > dh) {
+    // good case: no overflow, divisor not 0
     uint64_t dv = *dl | ((uint64_t)dh << 32);
-    uint32_t quot = dv / ds, rem = dv - (quot * ds);
+    uint32_t quot = dv / ds, rem = dv - ((uint64_t)quot * ds);
     if (~quot&1) rem -= ds;
     *dl = quot;
     return rem;
@@ -3055,8 +3085,8 @@ static uint32_t REGPARM(3) sh2_drc_divu64(uint32_t dh, uint32_t *dl, uint32_t ds
       dv = (dv<<1) | t;
       t = v;
       v = dv;
-      if (q)  dv += ((uint64_t)ds << 32), q =   dv < v;
-      else    dv -= ((uint64_t)ds << 32), q = !(dv < v);
+      if (q)  dv += ((uint64_t)ds << 32), q = dv < v;
+      else    dv -= ((uint64_t)ds << 32), q = dv > v;
       q ^= t, t = !q;
     }
     *dl = (dv<<1) | t;
@@ -3064,16 +3094,17 @@ static uint32_t REGPARM(3) sh2_drc_divu64(uint32_t dh, uint32_t *dl, uint32_t ds
   }
 }
 
-static uint32_t REGPARM(2) sh2_drc_divs32(int32_t dv, int32_t ds)
+static uint32_t REGPARM(3) sh2_drc_divs32(int32_t dv, uint32_t *dt, int32_t ds)
 {
   uint32_t adv = abs(dv), ads = abs(ds)>>16;
-  if (ads > 1 && ads > adv>>16 && (int32_t)ads > 0 && !(uint16_t)ds) {
-    // good case: no divide by 0, and no result overflow
+  if (ads > adv>>16 && ds != 0x80000000 && (int16_t)ds == 0) {
+    // good case: no overflow, divisor not 0 and not MIN_INT, lower 16 bits 0
     uint32_t quot = adv / ads, rem = adv - (quot * ads);
     int m1 = (rem ? dv^ds : ds) < 0;
     if (rem && dv < 0)  rem = (quot&1 ? -rem : +ads-rem);
     else                rem = (quot&1 ? +rem : -ads+rem);
     quot = ((dv^ds)<0 ? -quot : +quot) - m1;
+    *dt = (rem>>15) & 1;
     return (uint16_t)quot | ((2*rem + (quot>>31)) << 16);
   } else {
     // bad case: use the sh2 algo to get the right result
@@ -3083,10 +3114,11 @@ static uint32_t REGPARM(2) sh2_drc_divs32(int32_t dv, int32_t ds)
       dv = (dv<<1) | t;
       t = v;
       v = dv;
-      if (m^q)  dv += ds, q =   (uint32_t)dv < v;
-      else      dv -= ds, q = !((uint32_t)dv < v);
+      if (m^q)  dv += ds, q = (uint32_t)dv < v;
+      else      dv -= ds, q = (uint32_t)dv > v;
       q ^= m^t, t = !(m^q);
     }
+    *dt = (uint32_t)dv>>31;
     return (dv<<1) | t;
   }
 }
@@ -3096,8 +3128,8 @@ static uint32_t REGPARM(3) sh2_drc_divs64(int32_t dh, uint32_t *dl, int32_t ds)
   int64_t _dv = *dl | ((int64_t)dh << 32);
   uint64_t adv = (_dv < 0 ? -_dv : _dv); // llabs isn't in older toolchains
   uint32_t ads = abs(ds);
-  if (ads > 1 && ads > adv>>32 && (int64_t)adv > 0) {
-    // good case: no divide by 0, and no result overflow
+  if (ads > adv>>32 && ds != 0x80000000) {
+    // good case: no overflow, divisor not 0 and not MIN_INT
     uint32_t quot = adv / ads, rem = adv - ((uint64_t)quot * ads);
     int m1 = (rem ? dh^ds : ds) < 0;
     if (rem && dh < 0) rem = (quot&1 ? -rem : +ads-rem);
@@ -3110,12 +3142,12 @@ static uint32_t REGPARM(3) sh2_drc_divs64(int32_t dh, uint32_t *dl, int32_t ds)
     uint64_t dv = *dl | ((uint64_t)dh << 32);
     int m = (uint32_t)ds>>31, q = (uint64_t)dv>>63, t = m^q, s = 32;
     while (s--) {
-      int64_t v = (uint64_t)dv>>63;
+      uint64_t v = (uint64_t)dv>>63;
       dv = (dv<<1) | t;
       t = v;
       v = dv;
-      if (m^q)  dv += ((uint64_t)ds << 32), q =   dv < v;
-      else      dv -= ((uint64_t)ds << 32), q = !(dv < v);
+      if (m^q)  dv += ((uint64_t)ds << 32), q = dv < v;
+      else      dv -= ((uint64_t)ds << 32), q = dv > v;
       q ^= m^t, t = !(m^q);
     }
     *dl = (dv<<1) | t;
@@ -3508,7 +3540,7 @@ static void REGPARM(2) *sh2_translate(SH2 *sh2, int tcache_id)
         // if exiting a pinned loop pinned regs must be written back to ctx
         // since they are reloaded in the loop entry code
         emith_cmp_r_imm(sr, 0);
-        EMITH_JMP_START(DCOND_GT);
+        EMITH_JMP_START(DCOND_GE);
         rcache_save_pinned();
 
         if (blx_target_count < ARRAY_SIZE(blx_targets)) {
@@ -3532,13 +3564,13 @@ static void REGPARM(2) *sh2_translate(SH2 *sh2, int tcache_id)
           emith_cmp_r_imm(sr, 0);
           blx_targets[blx_target_count++] =
               (struct linkage) { .pc = pc, .ptr = tcache_ptr, .mask = 0x1 };
-          emith_jump_cond_patchable(DCOND_LE, tcache_ptr);
+          emith_jump_cond_patchable(DCOND_LT, tcache_ptr);
         } else {
           // blx table full, must inline exit code
           tmp = rcache_get_tmp_arg(0);
           emith_cmp_r_imm(sr, 0);
           EMITH_SJMP_START(DCOND_GT);
-          emith_move_r_imm_c(DCOND_LE, tmp, pc);
+          emith_move_r_imm_c(DCOND_LT, tmp, pc);
           emith_jump_cond(DCOND_LE, sh2_drc_exit);
           EMITH_SJMP_END(DCOND_GT);
           rcache_free_tmp(tmp);
@@ -3921,8 +3953,10 @@ static void REGPARM(2) *sh2_translate(SH2 *sh2, int tcache_id)
 #if DIV_OPTIMIZER
           if (div(opd).div1 == 16 && div(opd).ro == div(opd).rn) {
             // divide 32/16
+            tmp = rcache_get_tmp_arg(1);
+            emith_add_r_r_ptr_imm(tmp, CONTEXT_REG, offsetof(SH2, drc_tmp));
             rcache_get_reg_arg(0, div(opd).rn, NULL);
-            rcache_get_reg_arg(1, div(opd).rm, NULL);
+            rcache_get_reg_arg(2, div(opd).rm, NULL);
             rcache_invalidate_tmp();
             emith_abicall(sh2_drc_divu32);
             tmp = rcache_get_tmp_ret();
@@ -3934,8 +3968,9 @@ static void REGPARM(2) *sh2_translate(SH2 *sh2, int tcache_id)
             emith_and_r_r_imm(tmp3, tmp2, 1);     // Q = !Rn[0]
             emith_eor_r_r_imm(tmp3, tmp3, 1);
             emith_or_r_r_lsl(sr, tmp3, Q_SHIFT);
+            emith_ctx_read(tmp3, offsetof(SH2, drc_tmp));
+            emith_or_r_r_r(sr, sr, tmp3);         // T
             rcache_free_tmp(tmp3);
-            emith_or_r_r_r_lsr(sr, sr, tmp2, 31); // T = Rn[31]
             skip_op = div(opd).div1 + div(opd).rotcl;
           }
           else if (div(opd).div1 == 32 && div(opd).ro != div(opd).rn) {
@@ -3960,7 +3995,6 @@ static void REGPARM(2) *sh2_translate(SH2 *sh2, int tcache_id)
             emith_eor_r_r_imm(tmp3, tmp3, 1);
             emith_or_r_r_lsl(sr, tmp3, Q_SHIFT);
             rcache_free_tmp(tmp3);
-            emith_or_r_r_r_lsr(sr, sr, tmp4, 31); // T = Ro[31]
             skip_op = div(opd).div1 + div(opd).rotcl;
           }
 #endif
@@ -4035,8 +4069,10 @@ static void REGPARM(2) *sh2_translate(SH2 *sh2, int tcache_id)
 #if DIV_OPTIMIZER
         if (div(opd).div1 == 16 && div(opd).ro == div(opd).rn) {
           // divide 32/16
+          tmp = rcache_get_tmp_arg(1);
+          emith_add_r_r_ptr_imm(tmp, CONTEXT_REG, offsetof(SH2, drc_tmp));
           rcache_get_reg_arg(0, div(opd).rn, NULL);
-          tmp2 = rcache_get_reg_arg(1, div(opd).rm, NULL);
+          tmp2 = rcache_get_reg_arg(2, div(opd).rm, NULL);
           tmp3 = rcache_get_tmp();
           emith_lsr(tmp3, tmp2, 31);
           emith_or_r_r_lsl(sr, tmp3, M_SHIFT);        // M = Rm[31]
@@ -4052,19 +4088,22 @@ static void REGPARM(2) *sh2_translate(SH2 *sh2, int tcache_id)
           emith_and_r_r_imm(tmp3, tmp3, 1);
           emith_eor_r_r_imm(tmp3, tmp3, 1);
           emith_or_r_r_lsl(sr, tmp3, Q_SHIFT);        // Q = !Rn[0]^M
+          emith_ctx_read(tmp3, offsetof(SH2, drc_tmp));
+          emith_or_r_r_r(sr, sr, tmp3);               // T
           rcache_free_tmp(tmp3);
-          emith_or_r_r_r_lsr(sr, sr, tmp2, 31);       // T = Rn[31]
           skip_op = div(opd).div1 + div(opd).rotcl;
         }
         else if (div(opd).div1 == 32 && div(opd).ro != div(opd).rn) {
           // divide 64/32
           tmp4 = rcache_get_reg(div(opd).ro, RC_GR_READ, NULL);
           emith_ctx_write(tmp4, offsetof(SH2, drc_tmp));
-          rcache_get_reg_arg(0, div(opd).rn, NULL);
+          tmp  = rcache_get_reg_arg(0, div(opd).rn, NULL);
           tmp2 = rcache_get_reg_arg(2, div(opd).rm, NULL);
           tmp3 = rcache_get_tmp_arg(1);
           emith_lsr(tmp3, tmp2, 31);
-          emith_or_r_r_lsl(sr, tmp3, M_SHIFT);         // M = Rm[31]
+          emith_or_r_r_lsl(sr, tmp3, M_SHIFT);        // M = Rm[31]
+          emith_eor_r_r_lsr(tmp3, tmp, 31);
+          emith_or_r_r(sr, tmp3);                     // T = Rn[31]^M
           emith_add_r_r_ptr_imm(tmp3, CONTEXT_REG, offsetof(SH2, drc_tmp));
           rcache_invalidate_tmp();
           emith_abicall(sh2_drc_divs64);
@@ -4081,7 +4120,6 @@ static void REGPARM(2) *sh2_translate(SH2 *sh2, int tcache_id)
           emith_eor_r_r_imm(tmp3, tmp3, 1);
           emith_or_r_r_lsl(sr, tmp3, Q_SHIFT);        // Q = !Ro[0]^M
           rcache_free_tmp(tmp3);
-          emith_or_r_r_r_lsr(sr, sr, tmp4, 31);       // T = Ro[31]
           skip_op = div(opd).div1 + div(opd).rotcl;
         } else
 #endif
@@ -5638,7 +5676,10 @@ int sh2_execute_drc(SH2 *sh2c, int cycles)
   // bit11 contains T saved for delay slot
   // others are usual SH2 flags
   sh2c->sr &= 0x3f3;
-  sh2c->sr |= cycles << 12;
+  sh2c->sr |= (cycles-1) << 12;
+#if (DRC_DEBUG & 8)
+  lastpc = lastcnt = 0;
+#endif
 
   sh2c->state |= SH2_IN_DRC;
   sh2_drc_entry(sh2c);
@@ -5646,11 +5687,16 @@ int sh2_execute_drc(SH2 *sh2c, int cycles)
 
   // TODO: irq cycles
   ret_cycles = (int32_t)sh2c->sr >> 12;
-  if (ret_cycles > 0)
+  if (ret_cycles >= 0)
     dbg(1, "warning: drc returned with cycles: %d, pc %08x", ret_cycles, sh2c->pc);
+#if (DRC_DEBUG & 8)
+  if (lastcnt)
+    dbg(8, "= %csh2 enter %08x %p (%d times), c=%d", sh2c->is_slave?'s':'m',
+      lastpc, lastblock, lastcnt, (signed int)sh2c->sr >> 12);
+#endif
 
   sh2c->sr &= 0x3f3;
-  return ret_cycles;
+  return ret_cycles+1;
 }
 
 static void block_stats(void)
@@ -6177,6 +6223,7 @@ u16 scan_block(u32 base_pc, int is_slave, u8 *op_flags, u32 *end_pc_out,
           break;
         case 1: // SLEEP      0000000000011011
           opd->op = OP_SLEEP;
+          opd->cycles = 3;
           end_block = 1;
           break;
         case 2: // RTE        0000000000101011

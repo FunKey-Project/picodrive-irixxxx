@@ -56,14 +56,14 @@ void p32x_update_irls(SH2 *active_sh2, unsigned int m68k_cycles)
   if (mrun) {
     p32x_sh2_poll_event(&msh2, SH2_IDLE_STATES, m68k_cycles);
     if (msh2.state & SH2_STATE_RUN)
-      sh2_end_run(&msh2, 1);
+      sh2_end_run(&msh2, 0);
   }
 
   srun = sh2_irl_irq(&ssh2, slvl, ssh2.state & SH2_STATE_RUN);
   if (srun) {
     p32x_sh2_poll_event(&ssh2, SH2_IDLE_STATES, m68k_cycles);
     if (ssh2.state & SH2_STATE_RUN)
-      sh2_end_run(&ssh2, 1);
+      sh2_end_run(&ssh2, 0);
   }
 
   elprintf(EL_32X, "update_irls: m %d/%d, s %d/%d", mlvl, mrun, slvl, srun);
@@ -142,9 +142,9 @@ void p32x_reset_sh2s(void)
       unsigned int vbr;
 
       // initial data
-      idl_src = CPU_BE2(*(unsigned int *)(Pico.rom + 0x3d4)) & ~0xf0000000;
-      idl_dst = CPU_BE2(*(unsigned int *)(Pico.rom + 0x3d8)) & ~0xf0000000;
-      idl_size= CPU_BE2(*(unsigned int *)(Pico.rom + 0x3dc));
+      idl_src = CPU_BE2(*(u32 *)(Pico.rom + 0x3d4)) & ~0xf0000000;
+      idl_dst = CPU_BE2(*(u32 *)(Pico.rom + 0x3d8)) & ~0xf0000000;
+      idl_size= CPU_BE2(*(u32 *)(Pico.rom + 0x3dc));
       if (idl_size > Pico.romsize || idl_src + idl_size > Pico.romsize ||
           idl_size > 0x40000 || idl_dst + idl_size > 0x40000 || (idl_src & 3) || (idl_dst & 3)) {
         elprintf(EL_STATUS|EL_ANOMALY, "32x: invalid initial data ptrs: %06x -> %06x, %06x",
@@ -154,11 +154,11 @@ void p32x_reset_sh2s(void)
         memcpy(Pico32xMem->sdram + idl_dst, Pico.rom + idl_src, idl_size);
 
       // VBR
-      vbr = CPU_BE2(*(unsigned int *)(Pico.rom + 0x3e8));
+      vbr = CPU_BE2(*(u32 *)(Pico.rom + 0x3e8));
       sh2_set_vbr(0, vbr);
 
       // checksum and M_OK
-      Pico32x.regs[0x28 / 2] = *(unsigned short *)(Pico.rom + 0x18e);
+      Pico32x.regs[0x28 / 2] = *(u16 *)(Pico.rom + 0x18e);
     }
     // program will set M_OK
   }
@@ -168,7 +168,7 @@ void p32x_reset_sh2s(void)
     unsigned int vbr;
 
     // GBR/VBR
-    vbr = CPU_BE2(*(unsigned int *)(Pico.rom + 0x3ec));
+    vbr = CPU_BE2(*(u32 *)(Pico.rom + 0x3ec));
     sh2_set_gbr(1, 0x20004000);
     sh2_set_vbr(1, vbr);
     // program will set S_OK
@@ -328,7 +328,7 @@ void p32x_event_schedule_sh2(SH2 *sh2, enum p32x_event event, int after)
   left_to_next = C_M68K_TO_SH2(sh2, (int)(event_time_next - now));
   if (sh2_cycles_left(sh2) > left_to_next) {
     if (left_to_next < 1)
-      left_to_next = 1;
+      left_to_next = 0;
     sh2_end_run(sh2, left_to_next);
   }
 }
@@ -421,7 +421,7 @@ void p32x_sync_other_sh2(SH2 *sh2, unsigned int m68k_target)
     left_to_event = C_M68K_TO_SH2(sh2, (int)(event_time_next - m68k_target));
     if (sh2_cycles_left(sh2) > left_to_event) {
       if (left_to_event < 1)
-        left_to_event = 1;
+        left_to_event = 0;
       sh2_end_run(sh2, left_to_event);
     }
   }

@@ -187,7 +187,7 @@ zip_failed:
   else if (strcasecmp(ext, "cso") == 0)
   {
     cso_struct *cso = NULL, *tmp = NULL;
-    int size;
+    int i, size;
     f = fopen(path, "rb");
     if (f == NULL)
       goto cso_failed;
@@ -229,6 +229,8 @@ zip_failed:
       elprintf(EL_STATUS, "cso: premature EOF");
       goto cso_failed;
     }
+    for (i = 0; i < size/4; i++)
+      cso->index[i] = CPU_LE4(cso->index[i]);
 
     // all ok
     cso->fpos_in = ftell(f);
@@ -280,7 +282,7 @@ cso_failed:
     chd->file.file = chd;
     chd->file.type = PMT_CHD;
     // subchannel data is skipped, remove it from total size
-    chd->file.size = chd_get_header(cf)->logicalbytes / CD_FRAME_SIZE * CD_MAX_SECTOR_DATA;
+    chd->file.size = head->logicalbytes / CD_FRAME_SIZE * CD_MAX_SECTOR_DATA;
     strncpy(chd->file.ext, ext, sizeof(chd->file.ext) - 1);
     return &chd->file;
 
@@ -359,7 +361,7 @@ static size_t _pm_read_chd(void *ptr, size_t bytes, pm_file *stream, int is_audi
       if (len > bytes)
         len = bytes;
 
-#ifdef CPU_IS_LE
+#if CPU_IS_LE
       if (is_audio) {
         // convert big endian audio samples
         u16 *dst = ptr, v;
@@ -821,7 +823,7 @@ int PicoCartInsert(unsigned char *rom, unsigned int romsize, const char *carthw_
   // This will hang the emu, but will prevent nasty crashes.
   // note: 4 bytes are padded to every ROM
   if (rom != NULL)
-    *(unsigned long *)(rom+romsize) = CPU_BE2(0x4EFAFFFE);
+    *(u32 *)(rom+romsize) = CPU_BE2(0x4EFAFFFE);
 
   Pico.rom=rom;
   Pico.romsize=romsize;
@@ -1254,11 +1256,11 @@ static void PicoCartDetect(const char *carthw_cfg)
   int fill_sram = 0;
 
   memset(&Pico.sv, 0, sizeof(Pico.sv));
-  if (Pico.rom[0x1B1] == 'R' && Pico.rom[0x1B0] == 'A')
+  if (Pico.rom[MEM_BE2(0x1B0)] == 'R' && Pico.rom[MEM_BE2(0x1B1)] == 'A')
   {
     Pico.sv.start =  rom_read32(0x1B4) & ~0xff000001; // align
     Pico.sv.end   = (rom_read32(0x1B8) & ~0xff000000) | 1;
-    if (Pico.rom[0x1B2] & 0x40)
+    if (Pico.rom[MEM_BE2(0x1B3)] & 0x40)
       // EEPROM
       Pico.sv.flags |= SRF_EEPROM;
     Pico.sv.flags |= SRF_ENABLED;
@@ -1309,7 +1311,7 @@ static void PicoCartDetect(const char *carthw_cfg)
 
   // Unusual region 'code'
   if (rom_strcmp(0x1f0, "EUROPE") == 0 || rom_strcmp(0x1f0, "Europe") == 0)
-    *(int *) (Pico.rom + 0x1f0) = 0x20204520;
+    *(u32 *) (Pico.rom + 0x1f0) = CPU_LE4(0x20204520);
 }
 
 // vim:shiftwidth=2:expandtab

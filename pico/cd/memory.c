@@ -68,20 +68,25 @@ static void remap_word_ram(u32 r3);
 
 void m68k_comm_check(u32 a)
 {
-  pcd_sync_s68k(SekCyclesDone(), 0);
+  u32 cycles = SekCyclesDone();
+  u32 clkdiff = cycles - Pico_mcd->m.m68k_poll_clk;
+  pcd_sync_s68k(cycles, 0);
   if (a >= 0x0e && !Pico_mcd->m.need_sync) {
     // there are cases when slave updates comm and only switches RAM
     // over after that (mcd1b), so there must be a resync..
     SekEndRun(64);
     Pico_mcd->m.need_sync = 1;
   }
-  if (SekNotPolling || a != Pico_mcd->m.m68k_poll_a) {
+  Pico_mcd->m.m68k_poll_clk = cycles;
+  if (SekNotPolling || a != Pico_mcd->m.m68k_poll_a || clkdiff > POLL_CYCLES || clkdiff <= 16) {
     Pico_mcd->m.m68k_poll_a = a;
     Pico_mcd->m.m68k_poll_cnt = 0;
     SekNotPolling = 0;
     return;
   }
   Pico_mcd->m.m68k_poll_cnt++;
+  if(Pico_mcd->m.m68k_poll_cnt == POLL_LIMIT)
+    SekEndRun(0);
 }
 
 #ifndef _ASM_CD_MEMORY_C
@@ -144,13 +149,15 @@ void m68k_reg_write8(u32 a, u32 d)
   u32 dold;
   a &= 0x3f;
 
+  Pico_mcd->m.m68k_poll_cnt = 0;
+
   switch (a) {
     case 0:
       d &= 1;
       if (d && (Pico_mcd->s68k_regs[0x33] & PCDS_IEN2)) {
         elprintf(EL_INTS, "m68k: s68k irq 2");
         pcd_sync_s68k(SekCyclesDone(), 0);
-        SekInterruptS68k(2);
+        pcd_irq_s68k(2, 1);
       }
       return;
     case 1:
@@ -180,8 +187,7 @@ void m68k_reg_write8(u32 a, u32 d)
       return;
     case 2:
       elprintf(EL_CDREGS, "m68k: prg wp=%02x", d);
-      Pico_mcd->s68k_regs[2] = d; // really use s68k side register
-      return;
+      goto write_comm;
     case 3:
       dold = Pico_mcd->s68k_regs[3];
       elprintf(EL_CDREG3, "m68k_regs w3: %02x @%06x", (u8)d, SekPc);
@@ -205,10 +211,10 @@ void m68k_reg_write8(u32 a, u32 d)
 
       goto write_comm;
     case 6:
-      Pico_mcd->bios[0x72 + 1] = d; // simple hint vector changer
+      Pico_mcd->bios[MEM_BE2(0x72)] = d; // simple hint vector changer
       return;
     case 7:
-      Pico_mcd->bios[0x72] = d;
+      Pico_mcd->bios[MEM_BE2(0x73)] = d;
       elprintf(EL_CDREGS, "hint vector set to %04x%04x",
         ((u16 *)Pico_mcd->bios)[0x70/2], ((u16 *)Pico_mcd->bios)[0x72/2]);
       return;
@@ -277,7 +283,7 @@ u32 s68k_poll_detect(u32 a, u32 d)
 
 #define READ_FONT_DATA(basemask) \
 { \
-      unsigned int fnt = *(unsigned int *)(Pico_mcd->s68k_regs + 0x4c); \
+      unsigned int fnt = CPU_LE4(*(u32 *)(Pico_mcd->s68k_regs + 0x4c)); \
       unsigned int col0 = (fnt >> 8) & 0x0f, col1 = (fnt >> 12) & 0x0f;   \
       if (fnt & (basemask << 0)) d  = col1      ; else d  = col0;       \
       if (fnt & (basemask << 1)) d |= col1 <<  4; else d |= col0 <<  4; \
@@ -425,7 +431,7 @@ void s68k_reg_write8(u32 a, u32 d)
         // XXX: emulate pending irq instead?
         if (Pico_mcd->s68k_regs[0x37] & 4) {
           elprintf(EL_INTS, "cdd export irq 4 (unmask)");
-          SekInterruptS68k(4);
+          pcd_irq_s68k(4, 1);
         }
       }
       break;
@@ -443,7 +449,7 @@ void s68k_reg_write8(u32 a, u32 d)
 
         if (Pico_mcd->s68k_regs[0x33] & PCDS_IEN4) {
           elprintf(EL_INTS, "cdd export irq 4");
-          SekInterruptS68k(4);
+          pcd_irq_s68k(4, 1);
         }
       }
       return;
@@ -494,6 +500,8 @@ void s68k_reg_write16(u32 a, u32 d)
 {
   u8 *r = Pico_mcd->s68k_regs;
 
+  Pico_mcd->m.s68k_poll_cnt = 0;
+
   if ((a & 0x1f0) == 0x20)
     goto write_comm;
 
@@ -501,8 +509,8 @@ void s68k_reg_write16(u32 a, u32 d)
     case 0x0e:
       // special case, 2 byte writes would be handled differently
       // TODO: verify
-      r[0xf] = d;
-      return;
+      d = (u8)d | (r[0xe] << 8);
+      goto write_comm;
     case 0x58: // stamp data size
       r[0x59] = d & 7;
       return;
@@ -1094,7 +1102,7 @@ void pcd_state_loaded_mem(void)
   Pico_mcd->m.dmna_ret_2m &= 3;
 
   // restore hint vector
-  *(unsigned short *)(Pico_mcd->bios + 0x72) = Pico_mcd->m.hint_vector;
+  *(u16 *)(Pico_mcd->bios + 0x72) = Pico_mcd->m.hint_vector;
 }
 
 #ifdef EMU_M68K

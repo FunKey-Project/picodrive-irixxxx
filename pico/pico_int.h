@@ -102,16 +102,16 @@ extern m68ki_cpu_core PicoCpuMM68k, PicoCpuMS68k;
 #define SekSr     m68k_get_reg(&PicoCpuMM68k, M68K_REG_SR)
 #define SekSrS68k m68k_get_reg(&PicoCpuMS68k, M68K_REG_SR)
 #define SekSetStop(x) { \
-	if(x) { SET_CYCLES(0); PicoCpuMM68k.stopped=STOP_LEVEL_STOP; } \
+	if(x) { PicoCpuMM68k.cyc_remaining_cycles = 0; PicoCpuMM68k.stopped=STOP_LEVEL_STOP; } \
 	else PicoCpuMM68k.stopped=0; \
 }
 #define SekSetStopS68k(x) { \
-	if(x) { SET_CYCLES(0); PicoCpuMS68k.stopped=STOP_LEVEL_STOP; } \
+	if(x) { PicoCpuMS68k.cyc_remaining_cycles = 0; PicoCpuMS68k.stopped=STOP_LEVEL_STOP; } \
 	else PicoCpuMS68k.stopped=0; \
 }
 #define SekIsStoppedM68k() (PicoCpuMM68k.stopped==STOP_LEVEL_STOP)
 #define SekIsStoppedS68k() (PicoCpuMS68k.stopped==STOP_LEVEL_STOP)
-#define SekShouldInterrupt() (CPU_INT_LEVEL > FLAG_INT_MASK)
+#define SekShouldInterrupt() (PicoCpuMM68k.int_level > PicoCpuMM68k.int_mask)
 
 #define SekNotPolling     PicoCpuMM68k.not_polling
 #define SekNotPollingS68k PicoCpuMS68k.not_polling
@@ -491,7 +491,8 @@ struct mcd_misc
   unsigned char  dmna_ret_2m;
   unsigned char  need_sync;
   unsigned char  pad3;
-  int pad4[9];
+  unsigned int   m68k_poll_clk;
+  int pad4[8];
 };
 
 typedef struct
@@ -773,6 +774,7 @@ void pcd_event_schedule(unsigned int now, enum pcd_event event, int after);
 void pcd_event_schedule_s68k(enum pcd_event event, int after);
 void pcd_prepare_frame(void);
 unsigned int pcd_cycles_m68k_to_s68k(unsigned int c);
+void pcd_irq_s68k(int irq, int state);
 int  pcd_sync_s68k(unsigned int m68k_target, int m68k_poll_sync);
 void pcd_run_cpus(int m68k_cycles);
 void pcd_soft_reset(void);
@@ -780,7 +782,7 @@ void pcd_state_loaded(void);
 
 // cd/pcm.c
 void pcd_pcm_sync(unsigned int to);
-void pcd_pcm_update(int *buffer, int length, int stereo);
+void pcd_pcm_update(s32 *buffer, int length, int stereo);
 void pcd_pcm_write(unsigned int a, unsigned int d);
 unsigned int pcd_pcm_read(unsigned int a);
 
@@ -876,6 +878,7 @@ void PicoVideoFIFOSync(int cycles);
 int PicoVideoFIFOHint(void);
 void PicoVideoFIFOMode(int active, int h40);
 int PicoVideoFIFOWrite(int count, int byte_p, unsigned sr_mask, unsigned sr_flags);
+void PicoVideoInit(void);
 void PicoVideoSave(void);
 void PicoVideoLoad(void);
 void PicoVideoCacheSAT(void);

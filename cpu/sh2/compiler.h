@@ -47,7 +47,7 @@ u16 scan_block(u32 base_pc, int is_slave, u8 *op_flags, u32 *end_pc,
 #elif defined(__riscv__) || defined(__riscv)
 #define	DRC_SR_REG	"s11"
 #define DRC_REG_LL	0	// no ABI for (__ILP32__ && __riscv_xlen != 32)
-#elif defined(__powerpc__)
+#elif defined(__powerpc__) || defined(__ppc__)
 #define	DRC_SR_REG	"r28"
 #define DRC_REG_LL	0	// no ABI for __ILP32__
 #elif defined(__i386__)
@@ -70,12 +70,13 @@ extern void REGPARM(1) (*sh2_drc_restore_sr)(SH2 *sh2);
 #else
 #define	DRC_DECLARE_SR	register long		_sh2_sr asm(DRC_SR_REG)
 #endif
+// NB: save/load SR register only when DRC is executing and not in DMA access
 #define DRC_SAVE_SR(sh2) \
-    if (likely(sh2->state & SH2_IN_DRC)) \
+    if (likely((sh2->state & (SH2_IN_DRC|SH2_STATE_SLEEP)) == SH2_IN_DRC)) \
 	sh2->sr = (s32)_sh2_sr
 //      sh2_drc_save_sr(sh2)
 #define DRC_RESTORE_SR(sh2) \
-    if (likely(sh2->state & SH2_IN_DRC)) \
+    if (likely((sh2->state & (SH2_IN_DRC|SH2_STATE_SLEEP)) == SH2_IN_DRC)) \
 	_sh2_sr = (s32)sh2->sr
 //      sh2_drc_restore_sr(sh2)
 #else
