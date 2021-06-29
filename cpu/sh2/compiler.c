@@ -68,7 +68,6 @@
 // 200 - compare trace
 // 400 - block entry backtrace on exit
 // 800 - state dump on exit
-// {
 #ifndef DRC_DEBUG
 #define DRC_DEBUG 0//x847
 #endif
@@ -218,7 +217,7 @@ static void REGPARM(3) *sh2_drc_log_entry(void *block, SH2 *sh2, u32 sr)
   if (block != NULL) {
 #if defined PDB
     dbg(8, "= %csh2 enter %08x %p, c=%d", sh2->is_slave?'s':'m',
-      sh2->pc, block, (signed int)sr >> 12);
+      sh2->pc, block, ((signed int)sr >> 12)+1);
     pdb_step(sh2, sh2->pc);
 #elif (DRC_DEBUG & 8)
     if (lastpc != sh2->pc) {
@@ -2612,10 +2611,14 @@ static uptr split_address(uptr la, uptr mask, s32 *offs)
   uptr sign = (mask>>1) + 1; // sign bit in offset
   *offs = (la & mask) | (la & sign ? ~mask : 0); // offset part, sign extended
   la = (la & ~mask) + ((la & sign) << 1); // base part, corrected for offs sign
-  if (~mask && la == ~mask && *offs > 0) { // special case la=-1&~mask && offs>0
-    *offs -= mask+1;
-    la = 0;
+#ifdef __arm__
+  // arm32 offset has an add/sub flag and an unsigned 8 bit value, which only
+  // allows values of [-255...255]. the value -256 thus can't be used.
+  if (*offs + sign == 0) {
+    la += sign;
+    *offs += sign;
   }
+#endif
   return la;
 }
 
@@ -4414,6 +4417,7 @@ static void REGPARM(2) *sh2_translate(SH2 *sh2, int tcache_id)
           EMITH_HINT_COND(DCOND_EQ);
           emith_subf_r_r_imm(tmp, tmp2, 1);
           emith_set_t_cond(sr, DCOND_EQ);
+          emith_or_r_imm(sr, SH2_NO_POLLING);
           goto end_op;
         }
         goto default_;
@@ -5013,7 +5017,7 @@ end_op:
         // can't resolve branch locally, make a block exit
         bl = dr_prepare_ext_branch(block->entryp, target_pc, sh2->is_slave, tcache_id);
         if (cond != -1) {
-#if 1
+#ifndef __arm__
           if (bl && blx_target_count < ARRAY_SIZE(blx_targets)) {
             // conditional jumps get a blx stub for the far jump
             bl->type = BL_JCCBLX;

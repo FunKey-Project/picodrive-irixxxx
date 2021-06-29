@@ -120,7 +120,8 @@ void NOINLINE p32x_sh2_poll_detect(u32 a, SH2 *sh2, u32 flags, int maxcnt)
   // by checking address (max 2 bytes away) and cycles (max 2 cycles later).
   // no polling if more than 20 cycles have passed since last detect call.
   if (a - sh2->poll_addr <= 2 && CYCLES_GE(20, cycles_diff)) {
-    if (CYCLES_GT(cycles_diff, 2) && ++sh2->poll_cnt >= maxcnt) {
+    if (!sh2_not_polling(sh2) && CYCLES_GT(cycles_diff, 2) &&
+                ++sh2->poll_cnt >= maxcnt) {
       if (!(sh2->state & flags))
         elprintf_sh2(sh2, EL_32X, "state: %02x->%02x",
           sh2->state, sh2->state | flags);
@@ -144,6 +145,7 @@ void NOINLINE p32x_sh2_poll_detect(u32 a, SH2 *sh2, u32 flags, int maxcnt)
     sh2->poll_addr = a;
   }
   sh2->poll_cycles = cycles_done;
+  sh2_set_polling(sh2);
 }
 
 void NOINLINE p32x_sh2_poll_event(SH2 *sh2, u32 flags, u32 m68k_cycles)
@@ -511,16 +513,17 @@ static void p32x_reg_write8(u32 a, u32 d)
     case 0x2d:
     case 0x2e:
     case 0x2f:
-      if (REG8IN16(r, a) != (u8)d) {
-        unsigned int cycles = SekCyclesDone();
+      { unsigned int cycles = SekCyclesDone();
 
         if (CYCLES_GT(cycles - msh2.m68krcycles_done, 64))
           p32x_sync_sh2s(cycles);
 
-        REG8IN16(r, a) = d;
-        p32x_sh2_poll_event(&sh2s[0], SH2_STATE_CPOLL, cycles);
-        p32x_sh2_poll_event(&sh2s[1], SH2_STATE_CPOLL, cycles);
-        sh2_poll_write(a & ~1, r[a / 2], cycles, NULL);
+        if (REG8IN16(r, a) != (u8)d) {
+          REG8IN16(r, a) = d;
+          p32x_sh2_poll_event(&sh2s[0], SH2_STATE_CPOLL, cycles);
+          p32x_sh2_poll_event(&sh2s[1], SH2_STATE_CPOLL, cycles);
+          sh2_poll_write(a & ~1, r[a / 2], cycles, NULL);
+        }
       }
       return;
     case 0x30:
@@ -608,16 +611,17 @@ static void p32x_reg_write16(u32 a, u32 d)
     case 0x2a/2:
     case 0x2c/2:
     case 0x2e/2:
-      if (r[a / 2] != (u16)d) {
-        unsigned int cycles = SekCyclesDone();
+      { unsigned int cycles = SekCyclesDone();
 
         if (CYCLES_GT(cycles - msh2.m68krcycles_done, 64))
           p32x_sync_sh2s(cycles);
 
-        r[a / 2] = d;
-        p32x_sh2_poll_event(&sh2s[0], SH2_STATE_CPOLL, cycles);
-        p32x_sh2_poll_event(&sh2s[1], SH2_STATE_CPOLL, cycles);
-        sh2_poll_write(a, (u16)d, cycles, NULL);
+        if (r[a / 2] != (u16)d) {
+          r[a / 2] = d;
+          p32x_sh2_poll_event(&sh2s[0], SH2_STATE_CPOLL, cycles);
+          p32x_sh2_poll_event(&sh2s[1], SH2_STATE_CPOLL, cycles);
+          sh2_poll_write(a, (u16)d, cycles, NULL);
+        }
       }
       return;
     case 0x30/2: // PWM control
