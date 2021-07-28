@@ -29,3 +29,4 @@ echo "===== Updating libpicofe..."
 cd /opt/picodrive-irixxxx/platform/common/minimp3
 git checkout master --quiet
 git pull
+echo ""
