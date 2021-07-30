@@ -20,12 +20,12 @@ cd /opt/picodrive-irixxxx/platform/libpicofe
 git checkout FunKey --quiet
 git pull
 echo ""
-echo "===== Updating libpicofe..."
+echo "===== Updating dr_libs..."
 cd /opt/picodrive-irixxxx/platform/common/dr_libs
 git checkout master --quiet
 git pull
 echo ""
-echo "===== Updating libpicofe..."
+echo "===== Updating minimp3..."
 cd /opt/picodrive-irixxxx/platform/common/minimp3
 git checkout master --quiet
 git pull
