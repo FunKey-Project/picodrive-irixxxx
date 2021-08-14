@@ -5,6 +5,7 @@ git pull
 ./submodule_update.sh
 cp icons/picodrive.png opk/
 cp AUTHORS COPYING README opk/
+cp picodrive.sh opk/
 
 cd /opt/FunKey-OS
 rm -rf FunKey/output/build/picodrive-*
@@ -27,7 +28,7 @@ esac
 print '[Desktop Entry]
 Name=Mega Drive
 Comment=MS/MD/MCD/32X emulator
-Exec=PicoDrive %f
+Exec=picodrive.sh %f
 Icon=picodrive
 Categories=emulators;
 SelectorFilter=zip,md,smd,sms,32x,cue,cso,iso,chd' > opk/picodrive.funkey-s.desktop
