@@ -5,4 +5,4 @@ if [ `md5sum /usr/games/PicoDrive | cut -d' ' -f1` != `md5sum PicoDrive | cut -d
 	cp -f PicoDrive /usr/games
 	ro
 fi
-exec /usr/games/PicoDrive "$1"
+exec /usr/games/launchers/megadrive_launch.sh "$1"
