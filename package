@@ -11,7 +11,7 @@ cd /opt/FunKey-OS
 rm -rf FunKey/output/build/picodrive-*
 git pull
 make
-cp FunKey/output/target/usr/games/PicoDrive /opt/picodrive-irixxxx/opk
+cp FunKey/output/target/usr/games/PicoDrive /opt/picodrive-funkey/opk
 cd -
 
 # https://unix.stackexchange.com/questions/219268/how-to-add-new-lines-when-using-echo
