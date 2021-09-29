@@ -40,11 +40,6 @@ void carthw_ssf2_write8(u32 a, u32 d)
     return;
   }
 
-  if ((Pico.sv.flags & SRF_ENABLED) && ((a & 0x0e) == 0)) {
-    PicoWrite8_io(a, d);
-    return;
-  }
-
   a &= 0x0e;
   if (a == 0)
     return;
