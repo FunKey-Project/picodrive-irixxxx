@@ -9,6 +9,7 @@ cp picodrive.sh opk/
 
 cd /opt/FunKey-OS
 rm -rf FunKey/output/build/picodrive-*
+sed -i 's|PICODRIVE_OVERRIDE_SRCDIR.*|PICODRIVE_OVERRIDE_SRCDIR = /opt/picodrive-funkey|' /opt/FunKey-OS/FunKey/output/local.mk
 git pull
 make
 cp FunKey/output/target/usr/games/PicoDrive /opt/picodrive-funkey/opk
@@ -33,6 +34,7 @@ Icon=picodrive
 Categories=emulators;
 SelectorFilter=zip,md,smd,sms,32x,cue,cso,chd' > opk/picodrive.funkey-s.desktop
 
-mksquashfs opk/ picodrive_v1.98_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
+rm -f *.opk
+mksquashfs opk/ picodrive_v1.98_$(md5sum opk/PicoDrive | cut -c1-7)_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
 
 rm -rf opk/
