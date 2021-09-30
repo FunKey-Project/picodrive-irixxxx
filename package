@@ -38,3 +38,5 @@ rm -f *.opk
 mksquashfs opk/ picodrive_v1.98_$(md5sum opk/PicoDrive | cut -c1-7)_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
 
 rm -rf opk/
+
+sed -i 's|PICODRIVE_OVERRIDE_SRCDIR.*|PICODRIVE_OVERRIDE_SRCDIR = /opt/picodrive-irixxxx|' /opt/FunKey-OS/FunKey/output/local.mk
