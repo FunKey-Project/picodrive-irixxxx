@@ -347,7 +347,8 @@ struct PicoMS
   unsigned char carthw[0x10];
   unsigned char io_ctl;
   unsigned char nmi_state;
-  unsigned char pad[0x4e];
+  unsigned char mapper;
+  unsigned char pad[0x4d];
 };
 
 // emu state and data for the asm code
@@ -686,10 +687,10 @@ void PicoDraw2Init(void);
 PICO_INTERNAL void PicoFrameFull();
 
 // mode4.c
-void PicoFrameStartMode4(void);
-void PicoLineMode4(int line);
-void PicoDoHighPal555M4(void);
-void PicoDrawSetOutputMode4(pdso_t which);
+void PicoFrameStartSMS(void);
+void PicoLineSMS(int line);
+void PicoDoHighPal555SMS(void);
+void PicoDrawSetOutputSMS(pdso_t which);
 
 // memory.c
 PICO_INTERNAL void PicoMemSetup(void);

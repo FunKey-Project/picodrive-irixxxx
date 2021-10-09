@@ -32,7 +32,7 @@ Comment=MS/MD/MCD/32X emulator
 Exec=picodrive.sh %f
 Icon=picodrive
 Categories=emulators;
-SelectorFilter=zip,md,smd,sms,32x,cue,cso,chd' > opk/picodrive.funkey-s.desktop
+SelectorFilter=zip,bin,md,smd,sms,32x,cue,cso,chd' > opk/picodrive.funkey-s.desktop
 
 rm -f *.opk
 mksquashfs opk/ picodrive_v1.98_$(md5sum opk/PicoDrive | cut -c1-7)_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
