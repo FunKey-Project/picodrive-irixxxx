@@ -28,7 +28,7 @@ esac
 
 print '[Desktop Entry]
 Name=Mega Drive
-Comment=MS/MD/MCD/32X emulator
+Comment=SMS/GG/MD/MCD/32X emulator
 Exec=picodrive.sh %f
 Icon=picodrive
 Categories=emulators;
