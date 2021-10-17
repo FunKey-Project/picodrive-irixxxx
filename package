@@ -35,7 +35,7 @@ Categories=emulators;
 SelectorFilter=zip,bin,md,smd,sms,gg,32x,cue,cso,chd' > opk/picodrive.funkey-s.desktop
 
 rm -f *.opk
-mksquashfs opk/ picodrive_v1.98_$(md5sum opk/PicoDrive | cut -c1-7)_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
+mksquashfs opk/ picodrive_v1.99pre_$(md5sum opk/PicoDrive | cut -c1-7)_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
 
 rm -rf opk/
 
