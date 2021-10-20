@@ -1572,12 +1572,27 @@ void plat_video_flip(void)
 		/* Surface with game data */
 		SDL_Surface *game_surface;
 
-		/* Sega Master System -> 256*192 res in 320*240 surface */
-		if (PicoIn.AHW & PAHW_SMS){
+		/* Sega Game Gear -> 160*144 res in 320*240 surface */
+		if ((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x3) == 0x3){
 
 			/* Copy sms game pixels */
 			int offset_y = (plat_sdl_screen->h - sms_game_screen->h)/2;
-			int offset_x = (plat_sdl_screen->w - sms_game_screen->w)/2 + 3;
+			int offset_x = (plat_sdl_screen->w - sms_game_screen->w)/2 - 1;
+			int y;
+			for(y=0; y<192; y++){
+				memcpy((uint16_t*)sms_game_screen->pixels + sms_game_screen->w*y,
+				       (uint16_t*)plat_sdl_screen->pixels + plat_sdl_screen->w*(y+offset_y) + offset_x,
+				       sms_game_screen->w*sizeof(uint16_t));
+			}
+
+			game_surface = sms_game_screen;
+		}
+		/* Sega Master System -> 256*192 res in 320*240 surface */
+		else if (PicoIn.AHW & PAHW_SMS){
+
+			/* Copy sms game pixels */
+			int offset_y = (plat_sdl_screen->h - sms_game_screen->h)/2;
+			int offset_x = (plat_sdl_screen->w - sms_game_screen->w)/2 + 5;
 			int y;
 			for(y=0; y<192; y++){
 				memcpy((uint16_t*)sms_game_screen->pixels + sms_game_screen->w*y,
