@@ -60,7 +60,8 @@ endif
 use_libchdr ?= 1
 ifeq "$(ARCH)" "arm"
 use_cyclone ?= 1
-use_drz80 ?= 1
+use_drz80 ?= 0
+use_cz80 ?= 1
 use_sh2drc ?= 1
 use_svpdrc ?= 1
 
