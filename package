@@ -2,6 +2,7 @@
 
 mkdir opk/
 git pull
+make clean
 ./submodule_update.sh
 cp icons/picodrive.png opk/
 cp AUTHORS COPYING README opk/
@@ -27,7 +28,7 @@ esac
 # Create GMenu2X entry file plus other things
 
 print '[Desktop Entry]
-Name=Mega Drive
+Name=PicoDrive
 Comment=SMS/GG/MD/MCD/32X emulator
 Exec=picodrive.sh %f
 Icon=picodrive
