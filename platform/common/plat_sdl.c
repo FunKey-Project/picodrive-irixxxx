@@ -1592,7 +1592,7 @@ void plat_video_flip(void)
 
 			/* Copy sms game pixels */
 			int offset_y = (plat_sdl_screen->h - sms_game_screen->h)/2;
-			int offset_x = (plat_sdl_screen->w - sms_game_screen->w)/2 + 5;
+			int offset_x = (plat_sdl_screen->w - sms_game_screen->w)/2 + 1;
 			int y;
 			for(y=0; y<192; y++){
 				memcpy((uint16_t*)sms_game_screen->pixels + sms_game_screen->w*y,
