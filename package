@@ -36,8 +36,8 @@ Categories=emulators;
 SelectorFilter=zip,bin,md,smd,sms,gg,32x,cue,cso,chd' > opk/picodrive.funkey-s.desktop
 
 rm -f *.opk
-mksquashfs opk/ picodrive_v1.99pre_$(md5sum opk/PicoDrive | cut -c1-7)_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
-
+mksquashfs opk/ picodrive_v1.99pre_$(git rev-parse HEAD | cut -c1-7)_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
+md5sum opk/PicoDrive
 rm -rf opk/
 
 sed -i 's|PICODRIVE_OVERRIDE_SRCDIR.*|PICODRIVE_OVERRIDE_SRCDIR = /opt/picodrive-irixxxx|' /opt/FunKey-OS/FunKey/output/local.mk
