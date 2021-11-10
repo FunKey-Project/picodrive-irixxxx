@@ -256,8 +256,11 @@ static int ld_left, ld_lines; // numbers in Q1 format
 
 static int EmuScanBegin16_ld(unsigned int num)
 {
-	if ((signed int)(ld_counter - num) > 100)
-		ld_counter = 0;
+	if ((signed int)(ld_counter - num) > 100) {
+		// vsync, offset so that the upscaled image is centered
+		ld_counter = 120 - (120-num) * (ld_lines+2)/ld_lines;
+		ld_left = ld_lines;
+	}
 
 	if (emu_scan_begin)
 		return emu_scan_begin(ld_counter);
@@ -301,26 +304,26 @@ static int make_local_pal_md(int fast_mode)
 	int pallen = 0x100;
 
 	if (fast_mode) {
-		bgr444_to_rgb32(localPal, PicoMem.cram);
+		bgr444_to_rgb32(localPal, PicoMem.cram, 64);
 		pallen = 0x40;
 		Pico.m.dirtyPal = 0;
 	}
 	else if (Pico.est.rendstatus & PDRAW_SONIC_MODE) { // mid-frame palette changes
 		switch (Pico.est.SonicPalCount) {
-		case 3: bgr444_to_rgb32(localPal+0xc0, Pico.est.SonicPal+0xc0);
-		case 2: bgr444_to_rgb32(localPal+0x80, Pico.est.SonicPal+0x80);
-		case 1: bgr444_to_rgb32(localPal+0x40, Pico.est.SonicPal+0x40);
-		default:bgr444_to_rgb32(localPal, Pico.est.SonicPal);
+		case 3: bgr444_to_rgb32(localPal+0xc0, Pico.est.SonicPal+0xc0, 64);
+		case 2: bgr444_to_rgb32(localPal+0x80, Pico.est.SonicPal+0x80, 64);
+		case 1: bgr444_to_rgb32(localPal+0x40, Pico.est.SonicPal+0x40, 64);
+		default:bgr444_to_rgb32(localPal, Pico.est.SonicPal, 64);
 		}
 		pallen = (Pico.est.SonicPalCount+1)*0x40;
 	}
 	else if (Pico.video.reg[0xC] & 8) { // shadow/hilight mode
-		bgr444_to_rgb32(localPal, Pico.est.SonicPal);
+		bgr444_to_rgb32(localPal, Pico.est.SonicPal, 64);
 		bgr444_to_rgb32_sh(localPal, Pico.est.SonicPal);
 		memcpy(localPal+0xc0, localPal, 0x40*4); // for spr prio mess
 	}
 	else {
-		bgr444_to_rgb32(localPal, Pico.est.SonicPal);
+		bgr444_to_rgb32(localPal, Pico.est.SonicPal, 64);
 		memcpy(localPal+0x40, localPal, 0x40*4); // for spr prio mess
 		memcpy(localPal+0x80, localPal, 0x80*4); // for spr prio mess
 	}
@@ -336,9 +339,27 @@ static int make_local_pal_md(int fast_mode)
 
 static int make_local_pal_sms(int fast_mode)
 {
-	bgr444_to_rgb32(localPal, PicoMem.cram);
-	Pico.m.dirtyPal = 0;
-	return 0x40;
+	static u16 tmspal[32] = {
+		// SMS palette for TMS modes
+		0x0000, 0x0000, 0x00a0, 0x00f0, 0x0500, 0x0f00, 0x0005, 0x0ff0,
+		0x000a, 0x000f, 0x0055, 0x00ff, 0x0050, 0x0f0f, 0x0555, 0x0fff,
+	};
+	int i;
+	
+	if (!(Pico.video.reg[0] & 0x4)) {
+		for (i = Pico.est.SonicPalCount; i >= 0; i--) {
+			bgr444_to_rgb32(localPal+i*0x40, tmspal, 32);
+			memcpy(localPal+i*0x40+0x20, localPal+i*0x40, 0x20*4);
+		}
+	} else {
+		for (i = Pico.est.SonicPalCount; i >= 0; i--) {
+			bgr444_to_rgb32(localPal+i*0x40, Pico.est.SonicPal+i*0x40, 32);
+			memcpy(localPal+i*0x40+0x20, localPal+i*0x40, 0x20*4);
+		}
+	}
+	if (Pico.m.dirtyPal == 2)
+		Pico.m.dirtyPal = 0;
+	return (Pico.est.SonicPalCount+1)*0x40;
 }
 
 void pemu_finalize_frame(const char *fps, const char *notice)
@@ -567,6 +588,12 @@ void emu_video_mode_change(int start_line, int line_count, int start_col, int co
 {
 	int scalex = 320, scaley = 240;
 	int ln_offs = 0;
+
+	/* NTSC always has 224 visible lines, anything smaller has bars */
+	if (line_count < 224 && line_count > 144) {
+		start_line -= (224-line_count) /2;
+		line_count = 224;
+	}
 
 	/* line doubling for swscaling, also needed for bg frames */
 	if (currentConfig.vscaling == EOPT_SCALE_SW && line_count < 240) {
