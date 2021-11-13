@@ -9,6 +9,7 @@ cp AUTHORS COPYING README opk/
 cp picodrive.sh opk/
 
 cd /opt/FunKey-OS
+rm -f br.log
 rm -rf FunKey/output/build/picodrive-*
 sed -i 's|PICODRIVE_OVERRIDE_SRCDIR.*|PICODRIVE_OVERRIDE_SRCDIR = /opt/picodrive-funkey|' /opt/FunKey-OS/FunKey/output/local.mk
 git pull
