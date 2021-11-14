@@ -33,7 +33,7 @@ Name=PicoDrive
 Comment=SMS/GG/MD/MCD/32X emulator
 Exec=picodrive.sh %f
 Icon=picodrive
-Categories=emulators;
+Categories=emulators
 SelectorFilter=zip,bin,md,smd,sms,gg,32x,cue,cso,chd' > opk/picodrive.funkey-s.desktop
 
 rm -f *.opk
