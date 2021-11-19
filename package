@@ -1,8 +1,10 @@
 #!/bin/sh
 
 mkdir opk/
-git pull
+#git pull
 make clean
+git fetch --all
+git merge upstream/FunKey
 ./submodule_update.sh
 cp icons/picodrive.png opk/
 cp AUTHORS COPYING README opk/
