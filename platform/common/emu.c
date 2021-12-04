@@ -715,8 +715,8 @@ void emu_prep_defconfig(void)
 	defaultConfig.s_PicoSndFilterAlpha = 0x10000 * 60 / 100;
 	defaultConfig.confirm_save = EOPT_CONFIRM_SAVE;
 	defaultConfig.Frameskip = -1; // auto
-	defaultConfig.input_dev0 = PICO_INPUT_PAD_3BTN;
-	defaultConfig.input_dev1 = PICO_INPUT_PAD_3BTN;
+	defaultConfig.input_dev0 = PICO_INPUT_PAD_6BTN;
+	defaultConfig.input_dev1 = PICO_INPUT_PAD_6BTN;
 	defaultConfig.volume = 50;
 	//defaultConfig.volume = 99;
 	defaultConfig.gamma = 100;
@@ -1612,6 +1612,9 @@ void emu_init(void)
 	PicoIn.mcdTrayClose = emu_tray_close;
 
 	sndout_init();
+
+	PicoSetInputDevice(0, currentConfig.input_dev0);
+	PicoSetInputDevice(1, currentConfig.input_dev1);
 }
 
 void emu_finish(void)
