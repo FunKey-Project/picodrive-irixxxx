@@ -1,4 +1,4 @@
-// configfile.c - handles loading and saving the configuration options
+// configfile_fk.c - handles loading and saving the configuration options
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>

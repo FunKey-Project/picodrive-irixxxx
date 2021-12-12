@@ -81,7 +81,8 @@ static struct uyvy { uint32_t y:8; uint32_t vyu:24; } yuv_uyvy[65536];
 
 SDL_Surface * hw_screen = NULL;
 SDL_Surface * virtual_hw_screen = NULL;
-SDL_Surface * sms_game_screen = NULL;
+static SDL_Surface * sms_game_screen = NULL;
+static SDL_Surface * gg_game_screen = NULL;
 
 void clear_screen(SDL_Surface *surface, uint16_t color)
 {
@@ -1473,6 +1474,169 @@ void flip_Downscale_OptimizedWidth320_mergeUpDown(SDL_Surface *src_surface, SDL_
   }
 }
 
+void upscale_160x144_to_240x240_bilinearish(SDL_Surface *src_surface, SDL_Surface *dst_surface)
+{
+  if (src_surface->w != 160)
+  {
+    printf("src_surface->w (%d) != 160 \n", src_surface->w);
+    return;
+  }
+  if (src_surface->h != 144)
+  {
+    printf("src_surface->h (%d) != 144 \n", src_surface->h);
+    return;
+  }
+
+  uint16_t *Src16 = (uint16_t *) src_surface->pixels;
+  uint16_t *Dst16 = (uint16_t *) dst_surface->pixels;
+
+  // There are 80 blocks of 2 pixels horizontally, and 48 of 3 horizontally.
+  // Horizontally: 240=80*3 160=80*2
+  // Vertically: 240=48*5 144=48*3
+  // Each block of 2*3 becomes 3x5.
+  uint32_t BlockX, BlockY;
+  uint16_t *BlockSrc;
+  uint16_t *BlockDst;
+  uint16_t _a, _b, _ab, __a, __b, __ab;
+  for (BlockY = 0; BlockY < 48; BlockY++)
+  {
+    BlockSrc = Src16 + BlockY * 160 * 3;
+    BlockDst = Dst16 + BlockY * 240 * 5;
+    for (BlockX = 0; BlockX < 80; BlockX++)
+    {
+      /* Horizontaly:
+       * Before(2):
+       * (a)(b)
+       * After(3):
+       * (a)(ab)(b)
+       */
+
+      /* Verticaly:
+       * Before(3):
+       * (1)(2)(3)
+       * After(5):
+       * (1)(12)(2)(23)(3)
+       */
+
+      // -- Line 1 --
+      _a = *(BlockSrc                          );
+      _b = *(BlockSrc                       + 1);
+      _ab = Weight1_1( _a,  _b);
+      *(BlockDst                               ) = _a;
+      *(BlockDst                            + 1) = _ab;
+      *(BlockDst                            + 2) = _b;
+
+      // -- Line 2 --
+      __a = *(BlockSrc            + 160 * 1    );
+      __b = *(BlockSrc            + 160 * 1 + 1);
+      __ab = Weight1_1( __a,  __b);
+      *(BlockDst                  + 240 * 1    ) = Weight1_1(_a, __a);
+      *(BlockDst                  + 240 * 1 + 1) = Weight1_1(_ab, __ab);
+      *(BlockDst                  + 240 * 1 + 2) = Weight1_1(_b, __b);
+
+      // -- Line 3 --
+      *(BlockDst                  + 240 * 2    ) = __a;
+      *(BlockDst                  + 240 * 2 + 1) = __ab;
+      *(BlockDst                  + 240 * 2 + 2) = __b;
+
+      // -- Line 4 --
+      _a = __a;
+      _b = __b;
+      _ab = __ab;
+      __a = *(BlockSrc            + 160 * 2    );
+      __b = *(BlockSrc            + 160 * 2 + 1);
+      __ab = Weight1_1( __a,  __b);
+      *(BlockDst                  + 240 * 3    ) = Weight1_1(_a, __a);
+      *(BlockDst                  + 240 * 3 + 1) = Weight1_1(_ab, __ab);
+      *(BlockDst                  + 240 * 3 + 2) = Weight1_1(_b, __b);
+
+      // -- Line 5 --
+      *(BlockDst                  + 240 * 4    ) = __a;
+      *(BlockDst                  + 240 * 4 + 1) = __ab;
+      *(BlockDst                  + 240 * 4 + 2) = __b;
+
+      BlockSrc += 2;
+      BlockDst += 3;
+    }
+  }
+}
+
+
+void upscale_160x144_to_240x216_bilinearish(SDL_Surface *src_surface, SDL_Surface *dst_surface)
+{
+  if (src_surface->w != 160)
+  {
+    printf("src_surface->w (%d) != 160 \n", src_surface->w);
+    return;
+  }
+  if (src_surface->h != 144)
+  {
+    printf("src_surface->h (%d) != 144 \n", src_surface->h);
+    return;
+  }
+
+  /* Y padding for centering */
+  uint32_t y_padding = (240 - 216) / 2 + 1;
+
+  uint16_t *Src16 = (uint16_t *) src_surface->pixels;
+  uint16_t *Dst16 = ((uint16_t *) dst_surface->pixels) + y_padding * 240;
+
+  // There are 80 blocks of 2 pixels horizontally, and 72 of 2 horizontally.
+  // Horizontally: 240=80*3 160=80*2
+  // Vertically: 216=72*3 144=72*2
+  // Each block of 2*3 becomes 3x5.
+  uint32_t BlockX, BlockY;
+  uint16_t *BlockSrc;
+  uint16_t *BlockDst;
+  volatile uint16_t _a, _b, _ab, __a, __b, __ab;
+  for (BlockY = 0; BlockY < 72; BlockY++)
+  {
+
+    BlockSrc = Src16 + BlockY * 160 * 2;
+    BlockDst = Dst16 + BlockY * 240 * 3;
+    for (BlockX = 0; BlockX < 80; BlockX++)
+    {
+      /* Horizontaly:
+       * Before(2):
+       * (a)(b)
+       * After(3):
+       * (a)(ab)(b)
+       */
+
+      /* Verticaly:
+       * Before(2):
+       * (1)(2)
+       * After(3):
+       * (1)(12)(2)
+       */
+
+      // -- Line 1 --
+      _a = *(BlockSrc                    );
+      _b = *(BlockSrc                 + 1);
+      _ab = Weight1_1( _a,  _b);
+      *(BlockDst                         ) = _a;
+      *(BlockDst                      + 1) = _ab;
+      *(BlockDst                      + 2) = _b;
+
+      // -- Line 2 --
+      __a = *(BlockSrc      + 160 * 1    );
+      __b = *(BlockSrc      + 160 * 1 + 1);
+      __ab = Weight1_1( __a,  __b);
+      *(BlockDst            + 240 * 1    ) = Weight1_1(_a, __a);
+      *(BlockDst            + 240 * 1 + 1) = Weight1_1(_ab, __ab);
+      *(BlockDst            + 240 * 1 + 2) = Weight1_1(_b, __b);
+
+      // -- Line 3 --
+      *(BlockDst            + 240 * 2    ) = __a;
+      *(BlockDst            + 240 * 2 + 1) = __ab;
+      *(BlockDst            + 240 * 2 + 2) = __b;
+
+      BlockSrc += 2;
+      BlockDst += 3;
+    }
+  }
+}
+
 void SDL_Rotate_270(SDL_Surface * hw_surface, SDL_Surface * virtual_hw_surface){
     int i, j;
     uint16_t *source_pixels = (uint16_t*) virtual_hw_surface->pixels;
@@ -1508,6 +1672,147 @@ void SDL_Rotate_270(SDL_Surface * hw_surface, SDL_Surface * virtual_hw_surface){
 }
 
 
+
+
+
+
+void scale_for_gg(SDL_Surface *src_surface, 
+                  SDL_Surface *dst_surface, 
+                  ENUM_ASPECT_RATIOS_TYPES aspect_ratio){
+  //printf("In %s\n", __func__);
+
+  switch(aspect_ratio){
+  case ASPECT_RATIOS_TYPE_STRETCHED:
+    upscale_160x144_to_240x240_bilinearish(src_surface, dst_surface);
+    break;
+
+  case ASPECT_RATIOS_TYPE_MANUAL:
+    ;uint32_t h_scaled = src_surface->h*RES_HW_SCREEN_HORIZONTAL/src_surface->w;
+    ;uint32_t h_zoomed = h_scaled + aspect_ratio_factor_percent*(RES_HW_SCREEN_VERTICAL - h_scaled)/100;
+    flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
+                    MAX(src_surface->w*h_zoomed/src_surface->h, RES_HW_SCREEN_HORIZONTAL),
+                    MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));
+    break;
+
+  case ASPECT_RATIOS_TYPE_CROPPED:
+    flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
+              src_surface->w*RES_HW_SCREEN_VERTICAL/src_surface->h,
+              RES_HW_SCREEN_VERTICAL);
+    break;
+
+  case ASPECT_RATIOS_TYPE_SCALED:
+    upscale_160x144_to_240x216_bilinearish(src_surface, dst_surface);
+    break;
+
+  default:
+    printf("Wrong aspect ratio value: %d\n", aspect_ratio);
+    aspect_ratio = ASPECT_RATIOS_TYPE_STRETCHED;
+    break;
+  }
+}
+
+
+void scale_for_SMS(SDL_Surface *src_surface, 
+                    SDL_Surface *dst_surface, 
+                    ENUM_ASPECT_RATIOS_TYPES aspect_ratio){
+  //printf("In %s\n", __func__);
+
+  switch(aspect_ratio){
+  case ASPECT_RATIOS_TYPE_STRETCHED:
+    flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
+              RES_HW_SCREEN_HORIZONTAL,
+              RES_HW_SCREEN_VERTICAL);
+    break;
+
+  case ASPECT_RATIOS_TYPE_MANUAL:
+    ;uint32_t h_scaled = MIN(src_surface->h*RES_HW_SCREEN_HORIZONTAL/src_surface->w,
+           RES_HW_SCREEN_VERTICAL);
+    uint32_t h_zoomed = MIN(h_scaled + aspect_ratio_factor_percent*(RES_HW_SCREEN_VERTICAL - h_scaled)/100,
+          RES_HW_SCREEN_VERTICAL);
+    flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
+                    MAX(src_surface->w*h_zoomed/src_surface->h, RES_HW_SCREEN_HORIZONTAL),
+                    MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));
+    break;
+
+  case ASPECT_RATIOS_TYPE_CROPPED:
+      flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
+              src_surface->w*RES_HW_SCREEN_VERTICAL/src_surface->h,
+              RES_HW_SCREEN_VERTICAL);
+    break;
+
+  case ASPECT_RATIOS_TYPE_SCALED:
+    flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
+              RES_HW_SCREEN_HORIZONTAL,
+              src_surface->h*RES_HW_SCREEN_HORIZONTAL/src_surface->w);
+    break;
+
+  default:
+    printf("Wrong aspect ratio value: %d\n", aspect_ratio);
+    aspect_ratio = ASPECT_RATIOS_TYPE_STRETCHED;
+    break;
+  }
+}
+
+
+void scale_for_genesis(SDL_Surface *src_surface, 
+                        SDL_Surface *dst_surface, 
+                        ENUM_ASPECT_RATIOS_TYPES aspect_ratio){
+  //printf("In %s\n", __func__);
+  uint16_t hres_max;
+
+  switch(aspect_ratio){
+  case ASPECT_RATIOS_TYPE_STRETCHED:
+    if(src_surface->w == 320 && src_surface->h < RES_HW_SCREEN_VERTICAL){
+      flip_Downscale_OptimizedWidth320_mergeUpDown(src_surface, dst_surface,
+                     RES_HW_SCREEN_HORIZONTAL, RES_HW_SCREEN_VERTICAL);
+    }
+    else if(src_surface->w == 320){
+      flip_Downscale_LeftRightGaussianFilter_OptimizedWidth320(src_surface, dst_surface,
+                     RES_HW_SCREEN_HORIZONTAL, RES_HW_SCREEN_VERTICAL);
+    }
+    else{
+      flip_Downscale_LeftRightGaussianFilter_Optimized(src_surface, dst_surface,
+                   RES_HW_SCREEN_HORIZONTAL, RES_HW_SCREEN_VERTICAL);
+      /*flip_Downscale_LeftRightGaussianFilter(src_surface, hw_screen,
+        RES_HW_SCREEN_HORIZONTAL, RES_HW_SCREEN_VERTICAL);*/
+    }
+    break;
+
+  case ASPECT_RATIOS_TYPE_MANUAL:
+    hres_max= MIN(RES_HW_SCREEN_VERTICAL, src_surface->h);
+    ;uint32_t h_scaled = MIN(src_surface->h*RES_HW_SCREEN_HORIZONTAL/src_surface->w,
+           RES_HW_SCREEN_VERTICAL);
+    uint32_t h_zoomed = MIN(h_scaled + aspect_ratio_factor_percent*(hres_max - h_scaled)/100,
+          RES_HW_SCREEN_VERTICAL);
+    flip_NNOptimized_LeftRightUpDownBilinear_Optimized8(src_surface, dst_surface,
+                    MAX(src_surface->w*h_zoomed/src_surface->h, RES_HW_SCREEN_HORIZONTAL),
+                    MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));
+    break;
+
+  case ASPECT_RATIOS_TYPE_CROPPED:
+    /*flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
+              MAX(src_surface->w*RES_HW_SCREEN_VERTICAL/src_surface->h, RES_HW_SCREEN_HORIZONTAL),
+              RES_HW_SCREEN_VERTICAL);*/
+      hres_max= MIN(RES_HW_SCREEN_VERTICAL, src_surface->h);
+      flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
+              MAX(src_surface->w*hres_max/src_surface->h, RES_HW_SCREEN_HORIZONTAL),
+              hres_max);
+    break;
+
+  case ASPECT_RATIOS_TYPE_SCALED:
+    flip_NNOptimized_LeftRightUpDownBilinear_Optimized8(src_surface, dst_surface,
+                    RES_HW_SCREEN_HORIZONTAL,
+                    MIN(src_surface->h*RES_HW_SCREEN_HORIZONTAL/src_surface->w, RES_HW_SCREEN_VERTICAL));
+    break;
+
+  default:
+    printf("Wrong aspect ratio value: %d\n", aspect_ratio);
+    aspect_ratio = ASPECT_RATIOS_TYPE_STRETCHED;
+    flip_NNOptimized_LeftRightUpDownBilinear_Optimized8(src_surface, dst_surface,
+                    RES_HW_SCREEN_HORIZONTAL, RES_HW_SCREEN_VERTICAL);
+    break;
+  }
+}
 
 
 
@@ -1573,19 +1878,20 @@ void plat_video_flip(void)
 		SDL_Surface *game_surface;
 
 		/* Sega Game Gear -> 160*144 res in 320*240 surface */
-		if ((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x3) == 0x3){
+		//if ((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x3) == 0x3){
+		if ((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x01)){
 
-			/* Copy sms game pixels */
-			int offset_y = (plat_sdl_screen->h - sms_game_screen->h)/2;
-			int offset_x = (plat_sdl_screen->w - sms_game_screen->w)/2 - 1;
+			/* Copy Game Gear game pixels */
+			int offset_y = (plat_sdl_screen->h - gg_game_screen->h)/2;
+			int offset_x = (plat_sdl_screen->w - gg_game_screen->w)/2 - 1;
 			int y;
-			for(y=0; y<192; y++){
-				memcpy((uint16_t*)sms_game_screen->pixels + sms_game_screen->w*y,
+			for(y=0; y<gg_game_screen->h; y++){
+				memcpy((uint16_t*)gg_game_screen->pixels + gg_game_screen->w*y,
 				       (uint16_t*)plat_sdl_screen->pixels + plat_sdl_screen->w*(y+offset_y) + offset_x,
-				       sms_game_screen->w*sizeof(uint16_t));
+				       gg_game_screen->w*sizeof(uint16_t));
 			}
 
-			game_surface = sms_game_screen;
+			game_surface = gg_game_screen;
 		}
 		/* Sega Master System -> 256*192 res in 320*240 surface */
 		else if (PicoIn.AHW & PAHW_SMS){
@@ -1594,7 +1900,7 @@ void plat_video_flip(void)
 			int offset_y = (plat_sdl_screen->h - sms_game_screen->h)/2;
 			int offset_x = (plat_sdl_screen->w - sms_game_screen->w)/2 + 1;
 			int y;
-			for(y=0; y<192; y++){
+			for(y=0; y<sms_game_screen->h; y++){
 				memcpy((uint16_t*)sms_game_screen->pixels + sms_game_screen->w*y,
 				       (uint16_t*)plat_sdl_screen->pixels + plat_sdl_screen->w*(y+offset_y) + offset_x,
 				       sms_game_screen->w*sizeof(uint16_t));
@@ -1610,62 +1916,26 @@ void plat_video_flip(void)
 		  /// --------------Optimized Flip depending on aspect ratio -------------
 		static int prev_aspect_ratio;
 		if(prev_aspect_ratio != aspect_ratio || need_screen_cleared){
-			//printf("aspect ratio changed: %d\n", aspect_ratio);
+			/*printf("aspect ratio changed: %s\n", aspect_ratio_name[aspect_ratio]);
+      printf("game_surface res = %dx%d\n", game_surface->w, game_surface->h);*/
 		  clear_screen(virtual_hw_screen, 0);
 		  prev_aspect_ratio = aspect_ratio;
 		  need_screen_cleared = 0;
 		}
-    uint16_t hres_max;
 
-		switch(aspect_ratio){
-		case ASPECT_RATIOS_TYPE_STRETCHED:
-			if(game_surface->w == 320 && game_surface->h < RES_HW_SCREEN_VERTICAL){
-			  flip_Downscale_OptimizedWidth320_mergeUpDown(game_surface, virtual_hw_screen,
-								       RES_HW_SCREEN_HORIZONTAL, RES_HW_SCREEN_VERTICAL);
-			}
-			else if(game_surface->w == 320){
-				flip_Downscale_LeftRightGaussianFilter_OptimizedWidth320(game_surface, virtual_hw_screen,
-											 RES_HW_SCREEN_HORIZONTAL, RES_HW_SCREEN_VERTICAL);
-			}
-			else{
-				flip_Downscale_LeftRightGaussianFilter_Optimized(game_surface, virtual_hw_screen,
-										 RES_HW_SCREEN_HORIZONTAL, RES_HW_SCREEN_VERTICAL);
-				/*flip_Downscale_LeftRightGaussianFilter(game_surface, hw_screen,
-				  RES_HW_SCREEN_HORIZONTAL, RES_HW_SCREEN_VERTICAL);*/
-			}
-			break;
-		case ASPECT_RATIOS_TYPE_MANUAL:
-      hres_max= MIN(RES_HW_SCREEN_VERTICAL, game_surface->h);
-			;uint32_t h_scaled = MIN(game_surface->h*RES_HW_SCREEN_HORIZONTAL/game_surface->w,
-						 RES_HW_SCREEN_VERTICAL);
-			uint32_t h_zoomed = MIN(h_scaled + aspect_ratio_factor_percent*(hres_max - h_scaled)/100,
-						RES_HW_SCREEN_VERTICAL);
-			flip_NNOptimized_LeftRightUpDownBilinear_Optimized8(game_surface, virtual_hw_screen,
-									    MAX(game_surface->w*h_zoomed/game_surface->h, RES_HW_SCREEN_HORIZONTAL),
-									    MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));
-			break;
-		case ASPECT_RATIOS_TYPE_CROPPED:
-			/*flip_NNOptimized_AllowOutOfScreen(game_surface, virtual_hw_screen,
-							  MAX(game_surface->w*RES_HW_SCREEN_VERTICAL/game_surface->h, RES_HW_SCREEN_HORIZONTAL),
-							  RES_HW_SCREEN_VERTICAL);*/
-        hres_max= MIN(RES_HW_SCREEN_VERTICAL, game_surface->h);
-        flip_NNOptimized_AllowOutOfScreen(game_surface, virtual_hw_screen,
-                MAX(game_surface->w*hres_max/game_surface->h, RES_HW_SCREEN_HORIZONTAL),
-                hres_max);
-			break;
-		case ASPECT_RATIOS_TYPE_SCALED:
-			flip_NNOptimized_LeftRightUpDownBilinear_Optimized8(game_surface, virtual_hw_screen,
-									    RES_HW_SCREEN_HORIZONTAL,
-									    MIN(game_surface->h*RES_HW_SCREEN_HORIZONTAL/game_surface->w, RES_HW_SCREEN_VERTICAL));
-			break;
-		default:
-			printf("Wrong aspect ratio value: %d\n", aspect_ratio);
-			aspect_ratio = ASPECT_RATIOS_TYPE_STRETCHED;
-			flip_NNOptimized_LeftRightUpDownBilinear_Optimized8(game_surface, virtual_hw_screen,
-									    RES_HW_SCREEN_HORIZONTAL, RES_HW_SCREEN_VERTICAL);
-			break;
-		}
-
+    /** Rescale for console */
+    /** Game Gear */
+    if((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x01)){
+      scale_for_gg(game_surface, virtual_hw_screen, aspect_ratio);
+    }
+    /** SMS */
+    else if(PicoIn.AHW & PAHW_SMS){
+      scale_for_SMS(game_surface, virtual_hw_screen, aspect_ratio);
+    }
+    /** Genesis */
+    else{
+      scale_for_genesis(game_surface, virtual_hw_screen, aspect_ratio);
+    }
 
 		// Rotate
 		//SDL_Rotate_270(hw_screen, virtual_hw_screen);
@@ -1838,6 +2108,12 @@ void plat_init(void)
     fprintf(stderr, "sms_game_screen failed: %s\n", SDL_GetError());
   }
 
+  gg_game_screen = SDL_CreateRGBSurface(SDL_SWSURFACE,
+      160, 144, 16, 0xFFFF, 0xFFFF, 0xFFFF, 0);
+  if (gg_game_screen == NULL) {
+    fprintf(stderr, "gg_game_screen failed: %s\n", SDL_GetError());
+  }
+
 	g_menuscreen_w = plat_sdl_screen->w;
 	g_menuscreen_h = plat_sdl_screen->h;
 	g_menuscreen_pp = g_menuscreen_w;
@@ -1884,6 +2160,7 @@ void plat_finish(void)
 {
 	SDL_FreeSurface(virtual_hw_screen);
 	SDL_FreeSurface(sms_game_screen);
+	SDL_FreeSurface(gg_game_screen);
 	deinit_menu_SDL();
 	free(shadow_fb);
 	shadow_fb = NULL;
