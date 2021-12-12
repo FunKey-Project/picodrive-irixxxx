@@ -41,7 +41,7 @@ extern void *plat_mem_get_for_drc(size_t size);
 extern int   plat_mem_set_exec(void *ptr, size_t size);
 
 // this one should handle display mode changes
-extern void emu_video_mode_change(int start_line, int line_count, int is_32cols);
+extern void emu_video_mode_change(int start_line, int line_count, int start_col, int col_count);
 
 // this must switch to 16bpp mode
 extern void emu_32x_startup(void);
@@ -64,7 +64,7 @@ extern void *p32x_bios_g, *p32x_bios_m, *p32x_bios_s;
 #define POPT_EN_MCD_PCM     (1<<10)
 #define POPT_EN_MCD_CDDA    (1<<11)
 #define POPT_EN_MCD_GFX     (1<<12) // 00 x000
-// unused                   (1<<13)
+#define POPT_EN_GG_LCD      (1<<13)
 #define POPT_EN_SOFTSCALE   (1<<14)
 #define POPT_EN_MCD_RAMCART (1<<15)
 #define POPT_DIS_VDP_FIFO   (1<<16) // 0x 0000
@@ -75,6 +75,7 @@ extern void *p32x_bios_g, *p32x_bios_m, *p32x_bios_s;
 #define POPT_EN_PWM         (1<<21)
 #define POPT_PWM_IRQ_OPT    (1<<22)
 #define POPT_DIS_FM_SSGEG   (1<<23)
+#define POPT_EN_FM_DAC      (1<<24) //x00 0000
 
 #define PAHW_MCD  (1<<0)
 #define PAHW_32X  (1<<1)
@@ -82,11 +83,15 @@ extern void *p32x_bios_g, *p32x_bios_m, *p32x_bios_s;
 #define PAHW_PICO (1<<3)
 #define PAHW_SMS  (1<<4)
 
+#define PHWS_AUTO 0
+#define PHWS_GG   1
+#define PHWS_SMS  2
+
 #define PQUIRK_FORCE_6BTN   (1<<0)
 
 // the emulator is configured and some status is reported
 // through this global state (not saved in savestates)
-typedef struct
+typedef struct PicoInterface
 {
 	unsigned int opt; // POPT_* bitfield
 
@@ -97,9 +102,13 @@ typedef struct
 	unsigned short skipFrame;      // skip rendering frame, but still do sound (if enabled) and emulation stuff
 	unsigned short regionOverride; // override the region detection 0: auto, 1: Japan NTSC, 2: Japan PAL, 4: US, 8: Europe
 	unsigned short autoRgnOrder;   // packed priority list of regions, for example 0x148 means this detection order: EUR, USA, JAP
+	unsigned int hwSelect;         // hardware preselected via option menu
+	unsigned int mapper;           // mapper selection for SMS, 0 = auto
 
 	unsigned short quirks;         // game-specific quirks: PQUIRK_*
 	unsigned short overclockM68k;  // overclock the emulated 68k, in %
+
+	unsigned short filter;         // softscale filter type
 
 	int sndRate;                   // rate in Hz
 	int sndFilterAlpha;            // Low pass sound filter alpha (Q16)
@@ -214,6 +223,7 @@ void PicoDoHighPal555(int sh, int line, struct PicoEState *est);
 #define PDRAW_BORDER_32     (1<<9) // center H32 in buffer (32 px border)
 #define PDRAW_SKIP_FRAME   (1<<10) // frame is skipped
 #define PDRAW_30_ROWS      (1<<11) // 30 rows mode (240 lines)
+#define PDRAW_32X_SCALE    (1<<12) // scale CLUT layer for 32X
 extern int rendstatus_old;
 extern int rendlines;
 
@@ -298,6 +308,8 @@ enum input_device {
   PICO_INPUT_NOTHING,
   PICO_INPUT_PAD_3BTN,
   PICO_INPUT_PAD_6BTN,
+  PICO_INPUT_PAD_TEAM,
+  PICO_INPUT_PAD_4WAY,
 };
 void PicoSetInputDevice(int port, enum input_device device);
 

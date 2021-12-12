@@ -17,7 +17,8 @@
 void (*PsndMix_32_to_16l)(short *dest, int *src, int count) = mix_32_to_16l_stereo;
 
 // master int buffer to mix to
-static s32 PsndBuffer[2*(44100+100)/50];
+// +1 for a fill triggered by an instruction overhanging into the next scanline
+static s32 PsndBuffer[2*(44100+100)/50+2];
 
 // cdda output buffer
 s16 cdda_out_buffer[2*1152];
@@ -66,7 +67,9 @@ void PsndRerate(int preserve_state)
     ym2612_pack_state();
     memcpy(state, YM2612GetRegs(), 0x204);
   }
-  YM2612Init(Pico.m.pal ? OSC_PAL/7 : OSC_NTSC/7, PicoIn.sndRate, !(PicoIn.opt&POPT_DIS_FM_SSGEG));
+  YM2612Init(Pico.m.pal ? OSC_PAL/7 : OSC_NTSC/7, PicoIn.sndRate,
+        ((PicoIn.opt&POPT_DIS_FM_SSGEG) ? 0 : ST_SSG) |
+        ((PicoIn.opt&POPT_EN_FM_DAC)    ? ST_DAC : 0));
   if (preserve_state) {
     // feed it back it's own registers, just like after loading state
     memcpy(YM2612GetRegs(), state, 0x204);
@@ -161,21 +164,21 @@ PICO_INTERNAL void PsndDoDAC(int cyc_to)
   Pico.snd.dac_val = dout;
 }
 
-PICO_INTERNAL void PsndDoPSG(int line_to)
+PICO_INTERNAL void PsndDoPSG(int cyc_to)
 {
   int pos, len;
   int stereo = 0;
 
-  // Q16, number of samples since last call
-  len = ((line_to+1) * Pico.snd.smpl_mult) - Pico.snd.psg_pos;
-  if (len <= 0)
-    return;
+  // number of samples to fill in buffer (Q20)
+  len = (cyc_to * Pico.snd.clkl_mult) - Pico.snd.psg_pos;
 
   // update position and calculate buffer offset and length
-  pos = (Pico.snd.psg_pos+0x8000) >> 16;
+  pos = (Pico.snd.psg_pos+0x80000) >> 20;
   Pico.snd.psg_pos += len;
-  len = ((Pico.snd.psg_pos+0x8000) >> 16) - pos;
+  len = ((Pico.snd.psg_pos+0x80000) >> 20) - pos;
 
+  if (len <= 0)
+    return;
   if (!PicoIn.sndOut || !(PicoIn.opt & POPT_EN_PSG))
     return;
 
@@ -187,22 +190,22 @@ PICO_INTERNAL void PsndDoPSG(int line_to)
 }
 
 #if 0
-PICO_INTERNAL void PsndDoYM2413(int line_to)
+PICO_INTERNAL void PsndDoYM2413(int cyc_to)
 {
   int pos, len;
   int stereo = 0;
   short *buf;
 
-  // Q16, number of samples since last call
-  len = ((line_to+1) * Pico.snd.smpl_mult) - Pico.snd.ym2413_pos;
-  if (len <= 0)
-    return;
+  // number of samples to fill in buffer (Q20)
+  len = (cyc_to * Pico.snd.clkl_mult) - Pico.snd.ym2413_pos;
 
   // update position and calculate buffer offset and length
-  pos = (Pico.snd.ym2413_pos+0x8000) >> 16;
+  pos = (Pico.snd.ym2413_pos+0x80000) >> 20;
   Pico.snd.ym2413_pos += len;
-  len = ((Pico.snd.ym2413_pos+0x8000) >> 16) - pos;
+  len = ((Pico.snd.ym2413_pos+0x80000) >> 20) - pos;
 
+  if (len <= 0)
+    return;
   if (!PicoIn.sndOut || !(PicoIn.opt & POPT_EN_YM2413))
     return;
 
@@ -233,17 +236,15 @@ PICO_INTERNAL void PsndDoFM(int cyc_to)
   int pos, len;
   int stereo = 0;
 
-  // Q16, number of samples since last call
+  // Q20, number of samples since last call
   len = (cyc_to * Pico.snd.clkl_mult) - Pico.snd.fm_pos;
-
-  // don't do this too often (about once every scanline)
-  if (len >> 16 <= PicoIn.sndRate >> 10)
-    return;
 
   // update position and calculate buffer offset and length
   pos = (Pico.snd.fm_pos+0x80000) >> 20;
   Pico.snd.fm_pos += len;
   len = ((Pico.snd.fm_pos+0x80000) >> 20) - pos;
+  if (len <= 0)
+    return;
 
   // fill buffer
   if (PicoIn.opt & POPT_EN_STEREO) {
@@ -326,7 +327,7 @@ static int PsndRender(int offset, int length)
   int stereo = (PicoIn.opt & 8) >> 3;
   int fmlen = ((Pico.snd.fm_pos+0x80000) >> 20);
   int daclen = ((Pico.snd.dac_pos+0x80000) >> 20);
-  int psglen = ((Pico.snd.psg_pos+0x8000) >> 16);
+  int psglen = ((Pico.snd.psg_pos+0x80000) >> 20);
 
   buf32 = PsndBuffer+(offset<<stereo);
 
@@ -337,7 +338,7 @@ static int PsndRender(int offset, int length)
     return length;
   }
 
-  // Fill up DAC output in case of missing samples (Q16 rounding errors)
+  // Fill up DAC output in case of missing samples (Q rounding errors)
   if (length-daclen > 0) {
     short *dacbuf = PicoIn.sndOut + (daclen << stereo);
     Pico.snd.dac_pos += (length-daclen) << 20;
@@ -353,7 +354,7 @@ static int PsndRender(int offset, int length)
   // Add in parts of the PSG output not yet done
   if (length-psglen > 0) {
     short *psgbuf = PicoIn.sndOut + (psglen << stereo);
-    Pico.snd.psg_pos += (length-psglen) << 16;
+    Pico.snd.psg_pos += (length-psglen) << 20;
     if (PicoIn.opt & POPT_EN_PSG)
       SN76496Update(psgbuf, length-psglen, stereo);
   }
@@ -410,22 +411,22 @@ PICO_INTERNAL void PsndGetSamples(int y)
 static int PsndRenderMS(int offset, int length)
 {
   int stereo = (PicoIn.opt & 8) >> 3;
-  int psglen = ((Pico.snd.psg_pos+0x8000) >> 16);
-  int ym2413len = ((Pico.snd.ym2413_pos+0x8000) >> 16);
+  int psglen = ((Pico.snd.psg_pos+0x80000) >> 20);
+  int ym2413len = ((Pico.snd.ym2413_pos+0x80000) >> 20);
 
   pprof_start(sound);
 
   // Add in parts of the PSG output not yet done
   if (length-psglen > 0) {
     short *psgbuf = PicoIn.sndOut + (psglen << stereo);
-    Pico.snd.psg_pos += (length-psglen) << 16;
+    Pico.snd.psg_pos += (length-psglen) << 20;
     if (PicoIn.opt & POPT_EN_PSG)
       SN76496Update(psgbuf, length-psglen, stereo);
   }
 
   if (length-ym2413len > 0) {
     short *ym2413buf = PicoIn.sndOut + (ym2413len << stereo);
-    Pico.snd.ym2413_pos += (length-ym2413len) << 16;
+    Pico.snd.ym2413_pos += (length-ym2413len) << 20;
     int len = (length-ym2413len);
     if (PicoIn.opt & POPT_EN_YM2413){
       while (len-- > 0) {

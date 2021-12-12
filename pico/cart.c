@@ -34,6 +34,7 @@ void (*PicoCDLoadProgressCB)(const char *fname, int percent) = NULL; // handled 
 int PicoGameLoaded;
 
 static void PicoCartDetect(const char *carthw_cfg);
+static void PicoCartDetectMS(void);
 
 /* cso struct */
 typedef struct _cso_struct
@@ -242,6 +243,7 @@ zip_failed:
     file->param = cso;
     file->size  = cso->header.total_bytes;
     file->type  = PMT_CSO;
+    strncpy(file->ext, ext, sizeof(file->ext) - 1);
     return file;
 
 cso_failed:
@@ -772,7 +774,7 @@ int PicoCartLoad(pm_file *f,unsigned char **prom,unsigned int *psize,int is_sms)
       ret = pm_read(p,todo,f);
       bytes_read += ret;
       p += ret;
-      PicoCartLoadProgressCB(bytes_read * 100 / size);
+      PicoCartLoadProgressCB(bytes_read * 100LL / size);
     }
     while (ret > 0);
   }
@@ -850,6 +852,8 @@ int PicoCartInsert(unsigned char *rom, unsigned int romsize, const char *carthw_
 
   if (!(PicoIn.AHW & (PAHW_MCD|PAHW_SMS)))
     PicoCartDetect(carthw_cfg);
+  else if (PicoIn.AHW & PAHW_SMS)
+    PicoCartDetectMS();
 
   // setup correct memory map for loaded ROM
   switch (PicoIn.AHW) {
@@ -1133,6 +1137,12 @@ static void parse_carthw(const char *carthw_cfg, int *fill_sram,
         carthw_radica_startup();
       else if (strcmp(p, "piersolar_mapper") == 0)
         carthw_pier_startup();
+      else if (strcmp(p, "sf001_mapper") == 0)
+        carthw_sf001_startup();
+      else if (strcmp(p, "sf002_mapper") == 0)
+        carthw_sf002_startup();
+      else if (strcmp(p, "sf004_mapper") == 0)
+        carthw_sf004_startup();
       else if (strcmp(p, "prot_lk3") == 0)
         carthw_prot_lk3_startup();
       else {
@@ -1314,4 +1324,17 @@ static void PicoCartDetect(const char *carthw_cfg)
     *(u32 *) (Pico.rom + 0x1f0) = CPU_LE4(0x20204520);
 }
 
+static void PicoCartDetectMS(void)
+{
+  memset(&Pico.sv, 0, sizeof(Pico.sv));
+
+  // Always map SRAM, since there's no indicator in ROM if it's needed or not
+  // TODO: this should somehow be coming from a cart database!
+
+  Pico.sv.size  = 0x8000; // Sega mapper, 2 banks of 16 KB each
+  Pico.sv.flags |= SRF_ENABLED;
+  Pico.sv.data = calloc(Pico.sv.size, 1);
+  if (Pico.sv.data == NULL)
+    Pico.sv.flags &= ~SRF_ENABLED;
+}
 // vim:shiftwidth=2:expandtab

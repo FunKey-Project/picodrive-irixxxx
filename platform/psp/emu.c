@@ -50,9 +50,9 @@ static int need_pal_upload = 0;
 
 static u16 __attribute__((aligned(16))) osd_buf[512*8]; // buffer for osd text
 
-static int h32_mode = 0;
 static int out_x, out_y;
 static int out_w, out_h;
+static float hscale, vscale;
 
 static struct in_default_bind in_psp_defbinds[] =
 {
@@ -104,7 +104,7 @@ static void change_renderer(int diff)
 
 static void apply_renderer(void)
 {
-	PicoIn.opt &= ~POPT_ALT_RENDERER;
+	PicoIn.opt &= ~(POPT_ALT_RENDERER|POPT_EN_SOFTSCALE);
 
 	switch (get_renderer()) {
 	case RT_16BIT:
@@ -152,11 +152,8 @@ static void set_scaling_params(void)
 	int fbimg_width, fbimg_height, fbimg_xoffs, fbimg_yoffs, border_hack = 0;
 	g_vertices[0].z = g_vertices[1].z = 0;
 
-	fbimg_height = (int)(out_h * currentConfig.scale + 0.5);
-	if (!h32_mode)
-		fbimg_width  = (int)(out_w * currentConfig.scale * currentConfig.hscale40 + 0.5);
-	else
-		fbimg_width  = (int)(out_w * currentConfig.scale * currentConfig.hscale32 + 0.5);
+	fbimg_height = (int)(out_h * vscale + 0.5);
+	fbimg_width  = (int)(out_w * hscale + 0.5);
 
 	if (fbimg_width  & 1) fbimg_width++;  // make even
 	if (fbimg_height & 1) fbimg_height++;
@@ -207,32 +204,42 @@ static void set_scaling_params(void)
 	*/
 }
 
+static void do_pal_update_sms(void)
+{
+	static u16 tmspal[32] = {
+		// SMS palette
+		0x0000, 0x0000, 0x00a0, 0x00f0, 0x0500, 0x0f00, 0x0005, 0x0ff0,
+		0x000a, 0x000f, 0x0055, 0x00ff, 0x0050, 0x0f0f, 0x0555, 0x0fff,
+	};
+	int i;
+	
+	if (!(Pico.video.reg[0] & 0x4)) {
+		for (i = Pico.est.SonicPalCount; i >= 0; i--)
+			do_pal_convert(localPal+i*0x40, tmspal, currentConfig.gamma, currentConfig.gamma2);
+	} else {
+		for (i = Pico.est.SonicPalCount; i >= 0; i--)
+			do_pal_convert(localPal+i*0x40, Pico.est.SonicPal+i*0x40, currentConfig.gamma, currentConfig.gamma2);
+	}
+	if (Pico.m.dirtyPal == 2)
+		Pico.m.dirtyPal = 0;
+	need_pal_upload = 1;
+}
+
 static void do_pal_update(void)
 {
 	u32 *dpal=(void *)localPal;
 	int i;
 
-	//for (i = 0x3f/2; i >= 0; i--)
-	//	dpal[i] = ((spal[i]&0x000f000f)<< 1)|((spal[i]&0x00f000f0)<<3)|((spal[i]&0x0f000f00)<<4);
-	if (PicoIn.AHW & PAHW_SMS) {
-		u32 *spal = (void *)PicoMem.cram; 
-		for (i = 0; i < 0x20 / 2; i++) {
-			u32 t = spal[i];
-			t = ((t & 0x00030003)<< 3) | ((t & 0x000c000c)<<7) | ((t & 0x00300030)<<10);
-			t |= (t >> 2) | ((t >> 4) & 0x08610861);
-			dpal[i] = t;
-		}
-		Pico.m.dirtyPal = 0;
-	} else if (PicoIn.opt & POPT_ALT_RENDERER) {
+	if (PicoIn.opt & POPT_ALT_RENDERER) {
 		do_pal_convert(localPal, PicoMem.cram, currentConfig.gamma, currentConfig.gamma2);
 		Pico.m.dirtyPal = 0;
 	}
 	else if (Pico.est.rendstatus & PDRAW_SONIC_MODE)
 	{
 		switch (Pico.est.SonicPalCount) {
-		case 3: do_pal_convert(localPal+0xc0/2, Pico.est.SonicPal+0xc0, currentConfig.gamma, currentConfig.gamma2);
-		case 2: do_pal_convert(localPal+0x80/2, Pico.est.SonicPal+0x80, currentConfig.gamma, currentConfig.gamma2);
-		case 1:	do_pal_convert(localPal+0x40/2, Pico.est.SonicPal+0x40, currentConfig.gamma, currentConfig.gamma2);
+		case 3: do_pal_convert(localPal+0xc0, Pico.est.SonicPal+0xc0, currentConfig.gamma, currentConfig.gamma2);
+		case 2: do_pal_convert(localPal+0x80, Pico.est.SonicPal+0x80, currentConfig.gamma, currentConfig.gamma2);
+		case 1:	do_pal_convert(localPal+0x40, Pico.est.SonicPal+0x40, currentConfig.gamma, currentConfig.gamma2);
 		default:do_pal_convert(localPal, Pico.est.SonicPal, currentConfig.gamma, currentConfig.gamma2);
 		}
 	}
@@ -270,9 +277,12 @@ static void blitscreen_clut(void)
 	sceGuTexMode(is_16bit_mode() ? GU_PSM_5650:GU_PSM_T8,0,0,0);
 	sceGuTexImage(0,512,512,512,g_screen_ptr);
 
-	if (!is_16bit_mode() && Pico.m.dirtyPal)
-		do_pal_update();
-
+	if (!is_16bit_mode() && Pico.m.dirtyPal) {
+		if (PicoIn.AHW & PAHW_SMS)
+			do_pal_update_sms();
+		else
+			do_pal_update();
+	}
 
 	if (need_pal_upload) {
 		need_pal_upload = 0;
@@ -370,7 +380,7 @@ static void vidResetMode(void)
 
 	sceGuClutMode(GU_PSM_5650,0,0xff,0);
 	sceGuTexFunc(GU_TFX_REPLACE,GU_TCC_RGB);
-	if (currentConfig.scaling)
+	if (currentConfig.filter)
 	     sceGuTexFilter(GU_LINEAR, GU_LINEAR);
 	else sceGuTexFilter(GU_NEAREST, GU_NEAREST);
 	sceGuTexScale(1.0f,1.0f);
@@ -575,10 +585,9 @@ void pemu_prep_defconfig(void)
 	defaultConfig.s_PsndRate = 22050;
 	defaultConfig.s_PicoCDBuffers = 64;
 	defaultConfig.CPUclock = 333;
-	defaultConfig.scaling = 1;     // bilinear filtering for psp
-	defaultConfig.scale = 1.20;    // fullscreen
-	defaultConfig.hscale40 = 1.25;
-	defaultConfig.hscale32 = 1.56;
+	defaultConfig.filter = EOPT_FILTER_BILINEAR; // bilinear filtering
+	defaultConfig.scaling = EOPT_SCALE_43;
+	defaultConfig.vscaling = EOPT_VSCALE_FULL;
 	defaultConfig.EmuOpt |= EOPT_SHOW_RTC;
 }
 
@@ -587,12 +596,6 @@ void pemu_validate_config(void)
 {
 	if (currentConfig.CPUclock < 33 || currentConfig.CPUclock > 333)
 		currentConfig.CPUclock = 333;
-	if (currentConfig.scaling < 0.01)
-		currentConfig.scaling = 0.01;
-	if (currentConfig.hscale40 < 0.01)
-		currentConfig.hscale40 = 0.01;
-	if (currentConfig.hscale32 < 0.01)
-		currentConfig.hscale32 = 0.01;
 	if (currentConfig.gamma < -4 || currentConfig.gamma >  16)
 		currentConfig.gamma = 0;
 	if (currentConfig.gamma2 < 0 || currentConfig.gamma2 > 2)
@@ -674,14 +677,45 @@ void plat_update_volume(int has_changed, int is_up)
 }
 
 /* prepare for MD screen mode change */
-void emu_video_mode_change(int start_line, int line_count, int is_32cols)
+void emu_video_mode_change(int start_line, int line_count, int start_col, int col_count)
 {
-	h32_mode = is_32cols;
-	out_y = start_line; out_x = (is_32cols ? 32 : 0);
-	out_h = line_count; out_w = (is_32cols ? 256:320);
+	/* NTSC always has 224 visible lines, anything smaller has bars */
+	if (line_count < 224 && line_count > 144) {
+		start_line -= (224-line_count) /2;
+		line_count = 224;
+	}
+
+	out_y = start_line; out_x = start_col;
+	out_h = line_count; out_w = col_count;
+
+	switch (currentConfig.vscaling) {
+	case EOPT_VSCALE_PAL:
+		vscale = (float)270/240;
+		break;
+	case EOPT_VSCALE_FULL:
+		vscale = (float)270/line_count;
+		break;
+	default:
+		vscale = 1;
+		break;
+	}
+	switch (currentConfig.scaling) {
+	case EOPT_SCALE_43:
+		hscale = (float)360/col_count;
+		break;
+	case EOPT_SCALE_WIDE:
+		hscale = (float)420/col_count;
+		break;
+	case EOPT_SCALE_FULL:
+		hscale = (float)480/col_count;
+		break;
+	default:
+		hscale = 1;
+		break;
+	}
 
 	vidResetMode();
-	if (h32_mode)	// clear borders from h40 remnants
+	if (col_count < 320)	// clear borders from h40 remnants
 		clearArea(1);
 }
 
@@ -741,25 +775,10 @@ void pemu_loop_end(void)
 	pemu_sound_stop();
 }
 
-// TODO 
+/* resume from suspend: change to main menu if emu was running */
 void emu_handle_resume(void)
 {
-	if (!(PicoIn.AHW & PAHW_MCD)) return;
-
-	// reopen first CD track
-	if (cdd.toc.tracks[0].fd != NULL)
-	{
-		lprintf("emu_HandleResume: reopen %s\n", cdd.toc.tracks[0].fname);
-		pm_close(cdd.toc.tracks[0].fd);
-		cdd.toc.tracks[0].fd = pm_open(cdd.toc.tracks[0].fname);
-		lprintf("reopen %s\n", cdd.toc.tracks[0].fd != NULL ? "ok" : "failed");
-	}
-
-	mp3_reopen_file();
-
-#if 0	// TODO
-	if (!(Pico_mcd->s68k_regs[0x36] & 1))
-		cdd_change_track(cdd.index, cdd.lba);
-#endif
+	if (engineState == PGS_Running)
+		engineState = PGS_Menu;
 }
 

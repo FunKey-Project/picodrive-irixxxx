@@ -59,6 +59,7 @@
 #define Weight1_1(A, B)   (Half(A) + Half(B) + Corr1_1(A, B))
 
 static void *shadow_fb;
+static struct area { int w, h; } area;
 
 static struct in_pdata in_sdl_platform_data = {
 	.defbinds = in_sdl_defbinds,
@@ -144,39 +145,44 @@ void bgr_to_uyvy_init(void)
   }
 }
 
-void rgb565_to_uyvy(void *d, const void *s, int pixels, int x2)
+void rgb565_to_uyvy(void *d, const void *s, int w, int h, int pitch, int x2)
 {
   uint32_t *dst = d;
   const uint16_t *src = s;
+  int i;
 
-  if (x2)
-  for (; pixels > 0; src += 4, dst += 4, pixels -= 4)
-  {
-    struct uyvy *uyvy0 = yuv_uyvy + src[0], *uyvy1 = yuv_uyvy + src[1];
-    struct uyvy *uyvy2 = yuv_uyvy + src[2], *uyvy3 = yuv_uyvy + src[3];
+  if (x2) while (h--) {
+    for (i = w; i > 0; src += 4, dst += 4, i -= 4)
+    {
+      struct uyvy *uyvy0 = yuv_uyvy + src[0], *uyvy1 = yuv_uyvy + src[1];
+      struct uyvy *uyvy2 = yuv_uyvy + src[2], *uyvy3 = yuv_uyvy + src[3];
 #if CPU_IS_LE
-    dst[0] = (uyvy0->y << 24) | uyvy0->vyu;
-    dst[1] = (uyvy1->y << 24) | uyvy1->vyu;
-    dst[2] = (uyvy2->y << 24) | uyvy2->vyu;
-    dst[3] = (uyvy3->y << 24) | uyvy3->vyu;
+      dst[0] = (uyvy0->y << 24) | uyvy0->vyu;
+      dst[1] = (uyvy1->y << 24) | uyvy1->vyu;
+      dst[2] = (uyvy2->y << 24) | uyvy2->vyu;
+      dst[3] = (uyvy3->y << 24) | uyvy3->vyu;
 #else
-    dst[0] = uyvy0->y | (uyvy0->vyu << 8);
-    dst[1] = uyvy1->y | (uyvy1->vyu << 8);
-    dst[2] = uyvy2->y | (uyvy2->vyu << 8);
-    dst[3] = uyvy3->y | (uyvy3->vyu << 8);
+      dst[0] = uyvy0->y | (uyvy0->vyu << 8);
+      dst[1] = uyvy1->y | (uyvy1->vyu << 8);
+      dst[2] = uyvy2->y | (uyvy2->vyu << 8);
+      dst[3] = uyvy3->y | (uyvy3->vyu << 8);
 #endif
-  } else 
-  for (; pixels > 0; src += 4, dst += 2, pixels -= 4)
-  {
-    struct uyvy *uyvy0 = yuv_uyvy + src[0], *uyvy1 = yuv_uyvy + src[1];
-    struct uyvy *uyvy2 = yuv_uyvy + src[2], *uyvy3 = yuv_uyvy + src[3];
+      }
+    src += pitch - w;
+  } else while (h--) {
+    for (i = w; i > 0; src += 4, dst += 2, i -= 4)
+    {
+      struct uyvy *uyvy0 = yuv_uyvy + src[0], *uyvy1 = yuv_uyvy + src[1];
+      struct uyvy *uyvy2 = yuv_uyvy + src[2], *uyvy3 = yuv_uyvy + src[3];
 #if CPU_IS_LE
-    dst[0] = (uyvy1->y << 24) | uyvy0->vyu;
-    dst[1] = (uyvy3->y << 24) | uyvy2->vyu;
+      dst[0] = (uyvy1->y << 24) | uyvy0->vyu;
+      dst[1] = (uyvy3->y << 24) | uyvy2->vyu;
 #else
-    dst[0] = uyvy1->y | (uyvy0->vyu << 8);
-    dst[1] = uyvy3->y | (uyvy2->vyu << 8);
+      dst[0] = uyvy1->y | (uyvy0->vyu << 8);
+      dst[1] = uyvy3->y | (uyvy2->vyu << 8);
 #endif
+    }
+    src += pitch - w;
   }
 }
 
@@ -1511,16 +1517,34 @@ void SDL_Rotate_270(SDL_Surface * hw_surface, SDL_Surface * virtual_hw_surface){
 
 static int clear_buf_cnt, clear_stat_cnt;
 
+void plat_video_set_size(int w, int h)
+{
+	if (area.w != w || area.h != h) {
+		area = (struct area) { w, h };
+
+		if (plat_sdl_change_video_mode(w, h, 0) < 0) {
+			// failed, revert to original resolution
+			plat_sdl_change_video_mode(g_screen_width, g_screen_height, 0);
+			w = g_screen_width, h = g_screen_height;
+		}
+		if (!plat_sdl_overlay && !plat_sdl_gl_active) {
+			g_screen_width = w;
+			g_screen_height = h;
+			g_screen_ppitch = w;
+			g_screen_ptr = plat_sdl_screen->pixels;
+		}
+	}
+}
+
 void plat_video_flip(void)
 {
 	if (plat_sdl_overlay != NULL) {
 		SDL_Rect dstrect =
 			{ 0, 0, plat_sdl_screen->w, plat_sdl_screen->h };
-
 		SDL_LockYUVOverlay(plat_sdl_overlay);
 		rgb565_to_uyvy(plat_sdl_overlay->pixels[0], shadow_fb,
-				g_screen_ppitch * g_screen_height,
-				plat_sdl_overlay->w > 2*plat_sdl_overlay->h);
+				area.w, area.h, g_screen_ppitch,
+				plat_sdl_overlay->w >= 2*area.w);
 		SDL_UnlockYUVOverlay(plat_sdl_overlay);
 		SDL_DisplayYUVOverlay(plat_sdl_overlay, &dstrect);
 	}
@@ -1548,12 +1572,27 @@ void plat_video_flip(void)
 		/* Surface with game data */
 		SDL_Surface *game_surface;
 
-		/* Sega Master System -> 256*192 res in 320*240 surface */
-		if (PicoIn.AHW & PAHW_SMS){
+		/* Sega Game Gear -> 160*144 res in 320*240 surface */
+		if ((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x3) == 0x3){
 
 			/* Copy sms game pixels */
 			int offset_y = (plat_sdl_screen->h - sms_game_screen->h)/2;
-			int offset_x = (plat_sdl_screen->w - sms_game_screen->w)/2 + 3;
+			int offset_x = (plat_sdl_screen->w - sms_game_screen->w)/2 - 1;
+			int y;
+			for(y=0; y<192; y++){
+				memcpy((uint16_t*)sms_game_screen->pixels + sms_game_screen->w*y,
+				       (uint16_t*)plat_sdl_screen->pixels + plat_sdl_screen->w*(y+offset_y) + offset_x,
+				       sms_game_screen->w*sizeof(uint16_t));
+			}
+
+			game_surface = sms_game_screen;
+		}
+		/* Sega Master System -> 256*192 res in 320*240 surface */
+		else if (PicoIn.AHW & PAHW_SMS){
+
+			/* Copy sms game pixels */
+			int offset_y = (plat_sdl_screen->h - sms_game_screen->h)/2;
+			int offset_x = (plat_sdl_screen->w - sms_game_screen->w)/2 + 1;
 			int y;
 			for(y=0; y<192; y++){
 				memcpy((uint16_t*)sms_game_screen->pixels + sms_game_screen->w*y,
@@ -1696,7 +1735,7 @@ void plat_video_menu_end(void)
 
 		SDL_LockYUVOverlay(plat_sdl_overlay);
 		rgb565_to_uyvy(plat_sdl_overlay->pixels[0], shadow_fb,
-				g_menuscreen_pp * g_menuscreen_h, 0);
+			g_menuscreen_w, g_menuscreen_h, g_menuscreen_pp, 0);
 		SDL_UnlockYUVOverlay(plat_sdl_overlay);
 
 		SDL_DisplayYUVOverlay(plat_sdl_overlay, &dstrect);
@@ -1723,11 +1762,11 @@ void plat_video_menu_leave(void)
 
 void plat_video_loop_prepare(void)
 {
-	// take over any new vout settings XXX ask plat_sdl for scaling instead!
+	// take over any new vout settings
 	plat_sdl_change_video_mode(g_menuscreen_w, g_menuscreen_h, 0);
-	// switch over to scaled output if available
-	if (plat_sdl_overlay != NULL || plat_sdl_gl_active || currentConfig.scaling != EOPT_SCALE_NONE) {
-		g_screen_width = 320;
+	// switch over to scaled output if available, but keep the aspect ratio
+	if (plat_sdl_overlay != NULL || plat_sdl_gl_active) {
+		g_screen_width = (240 * g_menuscreen_w / g_menuscreen_h) & ~1;
 		g_screen_height = 240;
 		g_screen_ppitch = g_screen_width;
 		plat_sdl_change_video_mode(g_screen_width, g_screen_height, 0);
@@ -1742,6 +1781,7 @@ void plat_video_loop_prepare(void)
 		g_screen_ptr = plat_sdl_screen->pixels;
 	}
 	plat_video_set_buffer(g_screen_ptr);
+	plat_video_set_size(g_screen_width, g_screen_height);
 }
 
 void plat_early_init(void)

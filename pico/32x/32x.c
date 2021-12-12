@@ -145,13 +145,13 @@ void p32x_reset_sh2s(void)
       idl_src = CPU_BE2(*(u32 *)(Pico.rom + 0x3d4)) & ~0xf0000000;
       idl_dst = CPU_BE2(*(u32 *)(Pico.rom + 0x3d8)) & ~0xf0000000;
       idl_size= CPU_BE2(*(u32 *)(Pico.rom + 0x3dc));
-      if (idl_size > Pico.romsize || idl_src + idl_size > Pico.romsize ||
-          idl_size > 0x40000 || idl_dst + idl_size > 0x40000 || (idl_src & 3) || (idl_dst & 3)) {
-        elprintf(EL_STATUS|EL_ANOMALY, "32x: invalid initial data ptrs: %06x -> %06x, %06x",
-          idl_src, idl_dst, idl_size);
+      // copy in guest memory space
+      idl_src += 0x2000000;
+      idl_dst += 0x6000000;
+      while (idl_size >= 4) {
+        p32x_sh2_write32(idl_dst, p32x_sh2_read32(idl_src, &msh2), &msh2);
+        idl_src += 4, idl_dst += 4, idl_size -= 4;
       }
-      else
-        memcpy(Pico32xMem->sdram + idl_dst, Pico.rom + idl_src, idl_size);
 
       // VBR
       vbr = CPU_BE2(*(u32 *)(Pico.rom + 0x3e8));
@@ -230,7 +230,6 @@ static void p32x_start_blank(void)
 
     // XXX: no proper handling of 32col mode..
     if ((Pico32x.vdp_regs[0] & P32XV_Mx) != 0 && // 32x not blanking
-        (Pico.video.reg[12] & 1) && // 40col mode
         (!(Pico.video.debug_p & PVD_KILL_32X)))
     {
       int md_bg = Pico.video.reg[7] & 0x3f;
@@ -238,7 +237,7 @@ static void p32x_start_blank(void)
       // we draw full layer (not line-by-line)
       PicoDraw32xLayer(offs, lines, md_bg);
     }
-    else if (Pico32xDrawMode != PDM32X_32X_ONLY)
+    else if (Pico32xDrawMode == PDM32X_BOTH)
       PicoDraw32xLayerMdOnly(offs, lines);
 
     pprof_end(draw);

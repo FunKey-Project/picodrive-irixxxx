@@ -166,7 +166,7 @@
     addpl   r0, r0, r2, asr #4
     cmp     r0, #0               @ if (volume <= MIN_ATT_INDEX)
     bgt     10f
-    ldr     r2, [r5,#0x1c]
+    ldr     r2, [r5,#0x1c]       @ sl
     mov     r0, #0
     cmp     r2, #0
     movne   r3, #EG_DEC
@@ -175,8 +175,7 @@
     b       10f
 
 1:  @ EG_REL
-    mov     r2, #0x200
-    cmp     r0, r2               @ if ( volume >= 0x200 )
+    cmp     r0, #0x200           @ if ( volume >= 0x200 )
     movge   r0, #1024
     subge   r0, #1
     movge   r3, #EG_OFF
@@ -236,7 +235,7 @@
     eorne   r0, r0, #0x400                @ ssgn ^= 4
     strneh  r0, [r5,#0x30]
     moveq   r0, #0
-    streq   r0, [r5,#0x0c]                @ phase = 0
+    streq   r0, [lr,#0x10]                @ phase = 0
 
     cmp     r2, #EG_ATT                   @ if ( state != EG_ATT )
     beq     9f
@@ -250,11 +249,11 @@
     cmp     r0, #32+62                    @ if ( ar+ksr >= 32+62 )
     movge   r3, #0
     strgeh  r3, [r5,#0x1a]                @ volume = MIN_ATT
-    bge     9f
+    bge     8f
 
     cmp     r3, #0
     movgt   r2, #EG_ATT
-    strb    r2, [r5,#0x17]                @ state
+8:  strb    r2, [r5,#0x17]                @ state
 9:
 .endm
 
@@ -277,8 +276,6 @@
     rsbge   r0, r0, #0x200                @ volume = (0x200-volume) & MAX_ATT
     lslge   r0, r0, #22
     lsrge   r0, r0, #22
-    ldrh    r0, [r5,#0x1a]                @ volume
-    ldrh    r3, [r5,#0x18]                @ tl
 
     add     r0, r0, r3                    @ volume += tl
     strh    r0, [r5,#0x34]                @ vol_out
@@ -680,7 +677,7 @@
 
 
 @ lr=context, r12=pack (stereo, ssg_enabled, disabled, lfo_enabled | pan_r, pan_l, ams[2] | AMmasks[4] | FB[4] | lfo_ampm[16])
-@ r0-r2=scratch, r3=sin_tab/scratch, r4=(length<<8)|unused[3],ssg_update,was_update,algo[3], r5=tl_tab/slot,
+@ r0-r2=scratch, r3=sin_tab/scratch, r4=(length<<8)|dac,unused[2],ssg_update,was_update,algo[3], r5=tl_tab/slot,
 @ r6-r7=vol_out[4], r8=eg_timer, r9=eg_timer_add[31:16], r10=op1_out, r11=buffer
 .global chan_render_loop @ chan_rend_context *ct, int *buffer, int length
 
@@ -691,8 +688,8 @@ chan_render_loop:
     ldr     r12, [lr, #0x4c]
     ldr     r0,  [lr, #0x50]
     mov     r11, r1
-    and     r0,  r0, #7
-    orr     r4,  r4, r0          @ (length<<8)|algo
+    and     r0,  r0, #0x87
+    orr     r4,  r4, r0          @ (length<<8)|dac,unused[4],algo[3]
     ldr     r8, [lr, #0x44]      @ eg_timer
     ldr     r9, [lr, #0x48]      @ eg_timer_add
     ldr     r10, [lr, #0x54]     @ op1_out
@@ -731,18 +728,24 @@ crl_loop:
 
 ssg_loop:
     mov     r6, #4
+    bic     r4, r4, #0x10           @ ssg_update
 ssg_upd_loop:
+    @ use lr as a pointer to the slot phases stored in the context
     update_ssg_eg
 #if 0
     subs    r6, r6, #1
+    addne   lr, lr, #4
     addne   r5, r5, #SLOT_STRUCT_SIZE
 #else
+    add     lr, lr, #4*2
     add     r5, r5, #SLOT_STRUCT_SIZE*2
     update_ssg_eg
     subs    r6, r6, #2
+    subne   lr, lr, #4
     subne   r5, r5, #SLOT_STRUCT_SIZE
 #endif
     bne     ssg_upd_loop
+    sub     lr, lr, #4*3
     sub     r5, r5, #SLOT_STRUCT_SIZE*3
 
     subs    r7, r7, #1<<EG_SH
@@ -753,7 +756,7 @@ ssg_done:
     @ -- EG --
     add     r8, r8, r9
     cmp     r8, #EG_TIMER_OVERFLOW
-    bcc     volout_upd
+    blo     volout_upd
     ldr     r1, [lr, #0x3c]     @ eg_cnt
 eg_loop:
     sub     r8, r8, #EG_TIMER_OVERFLOW
@@ -921,6 +924,13 @@ crl_algo_done:
     tst     r0, r0
     beq     ctl_sample_skip
     orr     r4, r4, #8              @ have_output
+    lsr     r1, r0, #31             @ clip (saturate) sample to 14 bit
+    cmn     r1, r0, asr #13
+    subne   r0, r1, #0x80000001
+    asrne   r0, r0, #18
+    tst     r4, r1, lsl #7          @ (sample < 0) && dac?
+    bicne   r0, r0, #0x1f
+    subne   r0, r0, #7<<5
     tst     r12, #1
     beq     ctl_sample_mono
 

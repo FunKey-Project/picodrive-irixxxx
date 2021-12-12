@@ -44,6 +44,8 @@
  */
 
 #include "pico_int.h"
+#include <platform/common/upscale.h>
+
 #define FORCE	// layer forcing via debug register?
 
 int (*PicoScanBegin)(unsigned int num) = NULL;
@@ -130,10 +132,14 @@ void blockcpy_or(void *dst, void *src, size_t n, int pat);
 void blockcpy_or(void *dst, void *src, size_t n, int pat)
 {
   unsigned char *pd = dst, *ps = src;
-  for (; n; n--)
-    *pd++ = (unsigned char) (*ps++ | pat);
+  if (dst > src) {
+    for (pd += n, ps += n; n; n--)
+      *--pd = (unsigned char) (*--ps | pat);
+  } else
+    for (; n; n--)
+      *pd++ = (unsigned char) (*ps++ | pat);
 }
-#define blockcpy memcpy
+#define blockcpy memmove
 #endif
 
 #define TileNormMaker_(pix_func,ret)                         \
@@ -1407,7 +1413,7 @@ static NOINLINE void PrepareSprites(int max_lines)
 
   if (!(Pico.video.reg[12]&1))
     max_sprites = 64, max_line_sprites = 16, max_width = 264;
-  if (PicoIn.opt & POPT_DIS_SPRITE_LIM)
+  if (*est->PicoOpt & POPT_DIS_SPRITE_LIM)
     max_line_sprites = MAX_LINE_SPRITES;
 
   sh = Pico.video.reg[0xC]&8; // shadow/hilight?
@@ -1640,23 +1646,34 @@ void FinalizeLine555(int sh, int line, struct PicoEState *est)
 
   PicoDrawUpdateHighPal();
 
-  if (Pico.video.reg[12]&1) {
-    len = 320;
+  if ((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x3) == 0x3)
+                                        len = 160;
+  else if (Pico.video.reg[12]&1)        len = 320;
+  else                                  len = 256;
+
+  if ((*est->PicoOpt & POPT_EN_SOFTSCALE) && len < 320) {
+    if (len == 256) {
+      switch (PicoIn.filter) {
+      case 3: h_upscale_bl4_4_5(pd, 320, ps, 256, len, f_pal); break;
+      case 2: h_upscale_bl2_4_5(pd, 320, ps, 256, len, f_pal); break;
+      case 1: h_upscale_snn_4_5(pd, 320, ps, 256, len, f_pal); break;
+      default: h_upscale_nn_4_5(pd, 320, ps, 256, len, f_pal); break;
+      }
+      if (est->rendstatus & PDRAW_32X_SCALE) { // 32X needs scaled CLUT data
+        unsigned char *psc = ps - 256, *pdc = psc;
+        rh_upscale_nn_4_5(pdc, 320, psc, 256, 256, f_nop);
+      }
+    } else if (len == 160)
+      switch (PicoIn.filter) {
+      case 3:
+      case 2: h_upscale_bl2_1_2(pd, 320, ps, 160, len, f_pal); break;
+      default: h_upscale_nn_1_2(pd, 320, ps, 160, len, f_pal); break;
+      }
   } else {
-    if (!(PicoIn.opt&POPT_DIS_32C_BORDER)) pd+=32;
-    len = 256;
-  }
-
-  {
+    if (!(*est->PicoOpt & POPT_DIS_32C_BORDER) && len < 320)
+      pd += (320-len) / 2;
 #if 1
-    int i;
-
-    for (i = len; i > 0; i-=4) {
-      *pd++ = pal[*ps++];
-      *pd++ = pal[*ps++];
-      *pd++ = pal[*ps++];
-      *pd++ = pal[*ps++];
-    }
+    h_copy(pd, 320, ps, 320, len, f_pal);
 #else
     extern void amips_clut(unsigned short *dst, unsigned char *src, unsigned short *pal, int count);
     extern void amips_clut_6bit(unsigned short *dst, unsigned char *src, unsigned short *pal, int count);
@@ -1668,19 +1685,20 @@ void FinalizeLine555(int sh, int line, struct PicoEState *est)
 }
 #endif
 
-static void FinalizeLine8bit(int sh, int line, struct PicoEState *est)
+void FinalizeLine8bit(int sh, int line, struct PicoEState *est)
 {
   unsigned char *pd = est->DrawLineDest;
+  unsigned char *ps = est->HighCol+8;
   int len;
   static int dirty_line;
 
+  // a hack for mid-frame palette changes
   if (Pico.m.dirtyPal == 1)
   {
-    // a hack for mid-frame palette changes
-    if (!(est->rendstatus & PDRAW_SONIC_MODE) | (line - dirty_line > 4)) {
-      // store a maximum of 2 additional palettes in SonicPal
-      if (est->SonicPalCount < 2)
-        est->SonicPalCount ++;
+    // store a maximum of 2 additional palettes in SonicPal
+    if (est->SonicPalCount < 2 &&
+        (!(est->rendstatus & PDRAW_SONIC_MODE) || (line - dirty_line > 4))) {
+      est->SonicPalCount ++;
       dirty_line = line;
       est->rendstatus |= PDRAW_SONIC_MODE;
     }
@@ -1688,22 +1706,33 @@ static void FinalizeLine8bit(int sh, int line, struct PicoEState *est)
     Pico.m.dirtyPal = 2;
   }
 
-  if (Pico.video.reg[12]&1) {
-    len = 320;
-  } else {
-    if (!(PicoIn.opt & POPT_DIS_32C_BORDER))
-      pd += 32;
-    len = 256;
-  }
+  if ((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x3) == 0x3)
+                                        len = 160;
+  else if (Pico.video.reg[12]&1)        len = 320;
+  else                                  len = 256;
 
-  if (DrawLineDestIncrement == 0) {
+  if (DrawLineDestIncrement == 0)
+    pd = est->HighCol+8;
+
+  if ((PicoIn.opt & POPT_EN_SOFTSCALE) && len < 320) {
+    unsigned char pal = 0;
+
     if (!sh && (est->rendstatus & PDRAW_SONIC_MODE))
-      blockcpy_or(pd+8, est->HighCol+8, len, est->SonicPalCount*0x40);
-  } else if (!sh && (est->rendstatus & PDRAW_SONIC_MODE)) {
-    // select active backup palette
-    blockcpy_or(pd, est->HighCol+8, len, est->SonicPalCount*0x40);
+      pal = est->SonicPalCount*0x40;
+    // Smoothing can't be used with CLUT, hence it's always Nearest Neighbour.
+    if (len == 256)
+      // use reverse version since src and dest ptr may be the same.
+      rh_upscale_nn_4_5(pd, 320, ps, 256, len, f_or);
+    else
+      rh_upscale_nn_1_2(pd, 320, ps, 256, len, f_or);
   } else {
-    blockcpy(pd, est->HighCol+8, len);
+    if (!(*est->PicoOpt & POPT_DIS_32C_BORDER) && len < 320)
+      pd += (320-len) / 2;
+    if (!sh && (est->rendstatus & PDRAW_SONIC_MODE))
+      // select active backup palette
+      blockcpy_or(pd, ps, len, est->SonicPalCount*0x40);
+    else if (pd != ps)
+      blockcpy(pd, ps, len);
   }
 }
 
@@ -1828,8 +1857,7 @@ static int DrawDisplay(int sh)
 // MUST be called every frame
 PICO_INTERNAL void PicoFrameStart(void)
 {
-  int offs = 8, lines = 224;
-  int dirty = ((Pico.est.rendstatus & PDRAW_SONIC_MODE) || Pico.m.dirtyPal);
+  int loffs = 8, lines = 224, coffs = 0, columns = 320;
   int sprep = Pico.est.rendstatus & (PDRAW_SPRITES_MOVED|PDRAW_DIRTY_SPRITES);
   int skipped = Pico.est.rendstatus & PDRAW_SKIP_FRAME;
 
@@ -1837,43 +1865,58 @@ PICO_INTERNAL void PicoFrameStart(void)
   Pico.est.rendstatus = 0;
   if ((Pico.video.reg[12] & 6) == 6)
     Pico.est.rendstatus |= PDRAW_INTERLACE; // interlace mode
-  if (!(Pico.video.reg[12] & 1))
+  if (!(Pico.video.reg[12] & 1)) {
     Pico.est.rendstatus |= PDRAW_32_COLS;
+    if (!(PicoIn.opt & POPT_EN_SOFTSCALE)) {
+      columns = 256;
+      coffs = 32;
+    }
+  }
   if (Pico.video.reg[1] & 8) {
     Pico.est.rendstatus |= PDRAW_30_ROWS;
-    offs = 0;
     lines = 240;
+    loffs = 0;
   }
+  if (PicoIn.opt & POPT_DIS_32C_BORDER)
+    coffs = 0;
 
   if (Pico.est.rendstatus != rendstatus_old || lines != rendlines) {
     rendlines = lines;
     // mode_change() might reset rendstatus_old by calling SetColorFormat
-    emu_video_mode_change((lines == 240) ? 0 : 8,
-      lines, (Pico.video.reg[12] & 1) ? 0 : 1);
+    emu_video_mode_change(loffs, lines, coffs, columns);
     rendstatus_old = Pico.est.rendstatus;
   }
   if (PicoIn.skipFrame) // preserve this until something is rendered at last
     Pico.est.rendstatus |= PDRAW_SKIP_FRAME;
   if (sprep | skipped)
     Pico.est.rendstatus |= PDRAW_PARSE_SPRITES;
+  if (PicoIn.AHW & PAHW_32X)
+    Pico.est.rendstatus |= PDRAW_32X_SCALE;
 
-  Pico.est.HighCol = HighColBase + offs * HighColIncrement;
-  Pico.est.DrawLineDest = (char *)DrawLineDestBase + offs * DrawLineDestIncrement;
+  Pico.est.HighCol = HighColBase + loffs * HighColIncrement;
+  Pico.est.DrawLineDest = (char *)DrawLineDestBase + loffs * DrawLineDestIncrement;
   Pico.est.DrawScanline = 0;
   skip_next_line = 0;
 
   if (FinalizeLine == FinalizeLine8bit) {
     // make a backup of the current palette in case Sonic mode is detected later
-    Pico.est.SonicPalCount = 0;
-    Pico.m.dirtyPal = (dirty ? 2 : 0); // mark as dirty but already copied
+    Pico.m.dirtyPal = (Pico.m.dirtyPal || Pico.est.SonicPalCount ? 2 : 0);
     blockcpy(Pico.est.SonicPal, PicoMem.cram, 0x40*2);
   }
+  Pico.est.SonicPalCount = 0;
 }
 
 static void DrawBlankedLine(int line, int offs, int sh, int bgc)
 {
-  if (PicoScanBegin != NULL)
-    PicoScanBegin(line + offs);
+  int skip = skip_next_line;
+
+  if (PicoScanBegin != NULL && skip == 0)
+    skip = PicoScanBegin(line + offs);
+
+  if (skip) {
+    skip_next_line = skip - 1;
+    return;
+  }
 
   BackFill(bgc, sh, &Pico.est);
 
@@ -1881,7 +1924,7 @@ static void DrawBlankedLine(int line, int offs, int sh, int bgc)
     FinalizeLine(sh, line, &Pico.est);
 
   if (PicoScanEnd != NULL)
-    PicoScanEnd(line + offs);
+    skip_next_line = PicoScanEnd(line + offs);
 
   Pico.est.HighCol += HighColIncrement;
   Pico.est.DrawLineDest = (char *)Pico.est.DrawLineDest + DrawLineDestIncrement;
@@ -1889,15 +1932,10 @@ static void DrawBlankedLine(int line, int offs, int sh, int bgc)
 
 static void PicoLine(int line, int offs, int sh, int bgc)
 {
-  int skip = 0;
-
-  if (skip_next_line > 0) {
-    skip_next_line--;
-    return;
-  }
+  int skip = skip_next_line;
 
   Pico.est.DrawScanline = line;
-  if (PicoScanBegin != NULL)
+  if (PicoScanBegin != NULL && skip == 0)
     skip = PicoScanBegin(line + offs);
 
   if (skip) {
@@ -1967,7 +2005,7 @@ void PicoDrawUpdateHighPal(void)
       sh = 0; // no s/h support
 
     if (PicoIn.AHW & PAHW_SMS)
-      PicoDoHighPal555M4();
+      PicoDoHighPal555SMS();
     else if (FinalizeLine == FinalizeLine8bit)
       PicoDoHighPal555_8bit(sh, 0, est);
     else
@@ -1978,6 +2016,8 @@ void PicoDrawUpdateHighPal(void)
       blockcpy(est->HighPal+0x40, est->HighPal, 0x40*2);
       blockcpy(est->HighPal+0x80, est->HighPal, 0x80*2);
     }
+    Pico.est.HighPal[0xe0] = 0x0000; // black and white, reserved for OSD
+    Pico.est.HighPal[0xf0] = 0xffff;
   }
 }
 
@@ -1990,7 +2030,6 @@ void PicoDrawSetOutFormat(pdso_t which, int use_32x_line_mode)
   {
     case PDF_8BIT:
       FinalizeLine = FinalizeLine8bit;
-      PicoDrawSetInternalBuf(Pico.est.Draw2FB, 328);
       break;
 
     case PDF_RGB555:
@@ -2006,7 +2045,7 @@ void PicoDrawSetOutFormat(pdso_t which, int use_32x_line_mode)
   }
   if (PicoIn.AHW & PAHW_32X)
     PicoDrawSetOutFormat32x(which, use_32x_line_mode);
-  PicoDrawSetOutputMode4(which);
+  PicoDrawSetOutputSMS(which);
   rendstatus_old = -1;
   Pico.m.dirtyPal = 1;
 }
@@ -2017,7 +2056,7 @@ void PicoDrawSetOutBufMD(void *dest, int increment)
     // kludge for no-copy mode, using ALT_RENDERER layout
     PicoDrawSetInternalBuf(dest, increment);
   } else if (FinalizeLine == NULL) {
-    PicoDrawSetInternalBuf(dest, increment); // needed for Mode4
+    PicoDrawSetInternalBuf(dest, increment); // needed for SMS
     PicoDraw2SetOutBuf(dest, increment);
   } else if (dest != NULL) {
     DrawLineDestBase = dest;

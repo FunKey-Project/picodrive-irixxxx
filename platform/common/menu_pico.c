@@ -48,7 +48,7 @@ static const char *rom_exts[] = {
 	"bin", "smd", "gen", "md",
 	"iso", "cso", "cue", "chd",
 	"32x",
-	"sms",
+	"sms", "gg",
 	NULL
 };
 
@@ -1814,6 +1814,33 @@ static int menu_loop_32x_options(int id, int keys)
 
 #endif
 
+// ------------ SMS options menu ------------
+
+#ifndef NO_SMS
+
+static const char *sms_hardwares[] = { "auto", "Game Gear", "Master System", NULL };
+static const char *sms_mappers[] = { "auto", "Sega", "Codemasters", "Korea", "Korea MSX", "Korea X-in-1", "Korea 4-Pak", "Korea Janggun", "Korea Nemesis", NULL };
+static const char h_smsfm[] = "FM sound is only supported by few games\nOther games may crash with FM enabled";
+
+static menu_entry e_menu_sms_options[] =
+{
+	mee_enum      ("System",        MA_SMSOPT_HARDWARE,    PicoIn.hwSelect, sms_hardwares),
+	mee_onoff_h   ("FM Sound Unit", MA_OPT2_ENABLE_YM2413, PicoIn.opt, POPT_EN_YM2413, h_smsfm),
+	mee_enum      ("Cartridge mapping", MA_SMSOPT_MAPPER,  PicoIn.mapper, sms_mappers),
+	mee_end,
+};
+
+static int menu_loop_sms_options(int id, int keys)
+{
+	static int sel = 0;
+
+	me_loop(e_menu_sms_options, &sel);
+
+	return 0;
+}
+
+#endif
+
 // ------------ adv options menu ------------
 
 static const char h_ovrclk[] = "Will break some games, keep at 0";
@@ -1825,8 +1852,9 @@ static menu_entry e_menu_adv_options[] =
 	mee_onoff     ("Emulate Z80",              MA_OPT2_ENABLE_Z80,    PicoIn.opt, POPT_EN_Z80),
 	mee_onoff     ("Emulate YM2612 (FM)",      MA_OPT2_ENABLE_YM2612, PicoIn.opt, POPT_EN_FM),
 	mee_onoff     ("Disable YM2612 SSG-EG",    MA_OPT2_DISABLE_YM_SSG,PicoIn.opt, POPT_DIS_FM_SSGEG),
+	mee_onoff     ("Enable YM2612 DAC noise",  MA_OPT2_ENABLE_YM_DAC, PicoIn.opt, POPT_EN_FM_DAC),
 	mee_onoff     ("Emulate SN76496 (PSG)",    MA_OPT2_ENABLE_SN76496,PicoIn.opt, POPT_EN_PSG),
-	mee_onoff     ("Emulate YM2413 (FM)",      MA_OPT2_ENABLE_YM2413 ,PicoIn.opt, POPT_EN_YM2413),
+	mee_onoff     ("Emulate Game Gear LCD",    MA_OPT2_ENABLE_GGLCD  ,PicoIn.opt, POPT_EN_GG_LCD),
 	mee_onoff     ("Disable idle loop patching",MA_OPT2_NO_IDLE_LOOPS,PicoIn.opt, POPT_DIS_IDLE_DET),
 	mee_onoff     ("Disable frame limiter",    MA_OPT2_NO_FRAME_LIMIT,currentConfig.EmuOpt, EOPT_NO_FRMLIMIT),
 	mee_onoff     ("Enable dynarecs",          MA_OPT2_DYNARECS,      PicoIn.opt, POPT_EN_DRC),
@@ -2119,6 +2147,9 @@ static menu_entry e_menu_options[] =
 #ifndef NO_32X
 	mee_handler   ("[32X options]",            menu_loop_32x_options),
 #endif
+#ifndef NO_SMS
+	mee_handler   ("[SMS options]",            menu_loop_sms_options),
+#endif
 	mee_handler   ("[Advanced options]",       menu_loop_adv_options),
 	mee_cust_nosave("Save global config",      MA_OPT_SAVECFG, mh_saveloadcfg, mgn_saveloadcfg),
 	mee_cust_nosave("Save cfg for loaded game",MA_OPT_SAVECFG_GAME, mh_saveloadcfg, mgn_saveloadcfg),
@@ -2307,7 +2338,7 @@ static void draw_frame_credits(void)
 
 static const char credits[] =
 	"PicoDrive v" VERSION "\n"
-	"(c) notaz, 2006-2013; irixxxx, 2018-2020\n\n"
+	"(c) notaz, 2006-2013; irixxxx, 2018-2021\n\n"
 	"Credits:\n"
 	"fDave: initial code\n"
 #ifdef EMU_C68K
@@ -2597,6 +2628,9 @@ static menu_entry *e_menu_table[] =
 	e_menu_cd_options,
 #ifndef NO_32X
 	e_menu_32x_options,
+#endif
+#ifndef NO_SMS
+	e_menu_sms_options,
 #endif
 	e_menu_keyconfig,
 	e_menu_hidden,

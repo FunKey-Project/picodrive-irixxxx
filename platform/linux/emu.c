@@ -14,6 +14,7 @@
 #include "../libpicofe/plat.h"
 #include "../common/emu.h"
 #include "../common/arm_utils.h"
+#include "../common/upscale.h"
 #include "../common/version.h"
 
 #include <pico/pico_int.h>
@@ -23,8 +24,10 @@ const char *renderer_names[] = { "16bit accurate", " 8bit accurate", " 8bit fast
 const char *renderer_names32x[] = { "accurate", "faster", "fastest", NULL };
 enum renderer_types { RT_16BIT, RT_8BIT_ACC, RT_8BIT_FAST, RT_COUNT };
 
-static int out_x, out_y;
-static int out_w, out_h;
+static int out_x, out_y, out_w, out_h;	// renderer output in render buffer
+static int screen_x, screen_y, screen_w, screen_h; // final render destination 
+static int render_bg;			// force 16bit mode for bg render
+static u16 *ghost_buf;			// backbuffer to simulate LCD ghosting
 
 void pemu_prep_defconfig(void)
 {
@@ -38,7 +41,7 @@ void pemu_validate_config(void)
 }
 
 #define is_16bit_mode() \
-	(currentConfig.renderer == RT_16BIT || (PicoIn.AHW & PAHW_32X))
+	(currentConfig.renderer == RT_16BIT || (PicoIn.AHW & PAHW_32X) || render_bg)
 
 static int get_renderer(void)
 {
@@ -82,33 +85,108 @@ static void draw_cd_leds(void)
 #undef p
 }
 
-static unsigned short *get_16bit_start(unsigned short *buf)
+/* render/screen buffer handling:
+ * In 16 bit mode, render output is directly placed in the screen buffer.
+ * SW scaling is handled in renderer (x) and in vscaling callbacks here (y).
+ * In 8 bit modes, output goes to the internal Draw2FB buffer in alternate
+ * renderer format (8 pix overscan at left/top/bottom), left aligned (DIS_32C).
+ * It is converted to 16 bit and SW scaled in pemu_finalize_frame.
+ *
+ * HW scaling always aligns the image to the left/top, since selecting an area
+ * for display isn't always possible.
+ */
+
+static inline u16 *screen_buffer(u16 *buf)
 {
-	// center the output on the screen
-	int offs = (g_screen_height-240)/2 * g_screen_ppitch + (g_screen_width-320)/2;
-	return buf + offs;
+	return buf + screen_y * g_screen_ppitch + screen_x -
+			(out_y * g_screen_ppitch + out_x);
+}
+
+void screen_blit(u16 *pd, int pp, u8* ps, int ss, u16 *pal)
+{
+	typedef void (*upscale_t)
+			(u16 *di,int ds, u8 *si,int ss, int w,int h, u16 *pal);
+	static const upscale_t upscale_256_224_hv[] = {
+		upscale_rgb_nn_x_4_5_y_16_17,	upscale_rgb_snn_x_4_5_y_16_17,
+		upscale_rgb_bl2_x_4_5_y_16_17,	upscale_rgb_bl4_x_4_5_y_16_17,
+	};
+	static const upscale_t upscale_256_____h[] = {
+		upscale_rgb_nn_x_4_5,		upscale_rgb_snn_x_4_5,
+		upscale_rgb_bl2_x_4_5,		upscale_rgb_bl4_x_4_5,
+	};
+	static const upscale_t upscale_____224_v[] = {
+		upscale_rgb_nn_y_16_17,		upscale_rgb_snn_y_16_17,
+		upscale_rgb_bl2_y_16_17,	upscale_rgb_bl4_y_16_17,
+	};
+	static const upscale_t upscale_160_144_hv[] = {
+		upscale_rgb_nn_x_1_2_y_3_5,	upscale_rgb_nn_x_1_2_y_3_5,
+		upscale_rgb_bl2_x_1_2_y_3_5,	upscale_rgb_bl4_x_1_2_y_3_5,
+	};
+	static const upscale_t upscale_160_____h[] = {
+		upscale_rgb_nn_x_1_2,		upscale_rgb_nn_x_1_2,
+		upscale_rgb_bl2_x_1_2,		upscale_rgb_bl2_x_1_2,
+	};
+	static const upscale_t upscale_____144_v[] = {
+		upscale_rgb_nn_y_3_5,		upscale_rgb_nn_y_3_5,
+		upscale_rgb_bl2_y_3_5,		upscale_rgb_bl4_y_3_5,
+	};
+	const upscale_t *upscale;
+	int y;
+
+	// handle software upscaling
+	upscale = NULL;
+	if (currentConfig.scaling == EOPT_SCALE_SW && out_w <= 256) {
+	    if (currentConfig.vscaling == EOPT_SCALE_SW && out_h <= 224)
+		// h+v scaling
+		upscale = out_w >= 256 ? upscale_256_224_hv: upscale_160_144_hv;
+	    else
+		// h scaling
+		upscale = out_w >= 256 ? upscale_256_____h : upscale_160_____h;
+	} else if (currentConfig.vscaling == EOPT_SCALE_SW && out_h <= 224)
+		// v scaling
+		upscale = out_w >= 256 ? upscale_____224_v : upscale_____144_v;
+	if (!upscale) {
+		// no scaling
+		for (y = 0; y < out_h; y++)
+			h_copy(pd, pp, ps, 328, out_w, f_pal);
+		return;
+	}
+
+	upscale[currentConfig.filter & 0x3](pd, pp, ps, ss, out_w, out_h, pal);
 }
 
 void pemu_finalize_frame(const char *fps, const char *notice)
 {
-
-
 	if (!is_16bit_mode()) {
 		// convert the 8 bit CLUT output to 16 bit RGB
-		unsigned short *pd = (unsigned short *)g_screen_ptr +
-					out_y * g_screen_ppitch + out_x;
-		unsigned char *ps = Pico.est.Draw2FB + 328*out_y + 8;
-		unsigned short *pal = Pico.est.HighPal;
-		int i, x;
+		u16 *pd = screen_buffer(g_screen_ptr) +
+				out_y * g_screen_ppitch + out_x;
+		u8  *ps = Pico.est.Draw2FB + out_y * 328 + out_x + 8;
 
-		pd = get_16bit_start(pd);
 		PicoDrawUpdateHighPal();
-		for (i = 0; i < out_h; i++, ps += 8) {
-			for (x = 0; x < out_w; x++)
-				*pd++ = pal[*ps++];
-			pd += g_screen_ppitch - out_w;
-			ps += 320 - out_w;
-		}
+
+		screen_blit(pd, g_screen_ppitch, ps, 328, Pico.est.HighPal);
+	}
+
+	if (currentConfig.ghosting && out_h == 144) {
+		// GG LCD ghosting emulation
+		u16 *pd = screen_buffer(g_screen_ptr) +
+				out_y * g_screen_ppitch + out_x;
+		u16 *ps = ghost_buf;
+		int y, h = currentConfig.vscaling == EOPT_SCALE_SW ? 240:out_h;
+		int w = currentConfig.scaling == EOPT_SCALE_SW ? 320:out_w;
+		if (currentConfig.ghosting == 1)
+			for (y = 0; y < h; y++) {
+				v_blend((u32 *)pd, (u32 *)ps, w/2, p_075_round);
+				pd += g_screen_ppitch;
+				ps += w;
+			}
+		else
+			for (y = 0; y < h; y++) {
+				v_blend((u32 *)pd, (u32 *)ps, w/2, p_05_round);
+				pd += g_screen_ppitch;
+				ps += w;
+			}
 	}
 
 //#define FUNKEY_AUTHORIZE_TEXT_OVERLAY
@@ -127,34 +205,45 @@ void pemu_finalize_frame(const char *fps, const char *notice)
 void plat_video_set_buffer(void *buf)
 {
 	if (is_16bit_mode())
-		PicoDrawSetOutBuf(get_16bit_start(buf), g_screen_ppitch * 2);
+		PicoDrawSetOutBuf(screen_buffer(buf), g_screen_ppitch * 2);
 }
 
 static void apply_renderer(void)
 {
+	PicoIn.opt &= ~(POPT_ALT_RENDERER|POPT_EN_SOFTSCALE|POPT_DIS_32C_BORDER);
+	if (is_16bit_mode()) {
+		if (currentConfig.scaling == EOPT_SCALE_SW) {
+			PicoIn.opt |= POPT_EN_SOFTSCALE;
+			PicoIn.filter = currentConfig.filter;
+		} else if (currentConfig.scaling == EOPT_SCALE_HW)
+			// hw scaling, render without any padding
+			PicoIn.opt |= POPT_DIS_32C_BORDER;
+	} else
+		PicoIn.opt |= POPT_DIS_32C_BORDER;
+
 	switch (get_renderer()) {
 	case RT_16BIT:
-		PicoIn.opt &= ~POPT_ALT_RENDERER;
-		PicoIn.opt &= ~POPT_DIS_32C_BORDER;
-		PicoDrawSetOutFormat(PDF_RGB555, 0);
-		PicoDrawSetOutBuf(get_16bit_start(g_screen_ptr), g_screen_ppitch * 2);
+		// 32X uses line mode for vscaling with accurate renderer, since
+		// the MD VDP layer must be unscaled and merging the scaled 32X
+		// image data will fail.
+		PicoDrawSetOutFormat(PDF_RGB555,
+			(PicoIn.AHW & PAHW_32X) && currentConfig.vscaling);
+		PicoDrawSetOutBuf(screen_buffer(g_screen_ptr), g_screen_ppitch * 2);
 		break;
 	case RT_8BIT_ACC:
-		PicoIn.opt &= ~POPT_ALT_RENDERER;
-		PicoIn.opt |=  POPT_DIS_32C_BORDER;
+		// for simplification the 8 bit accurate renderer uses the same
+		// storage format as the fast renderer
 		PicoDrawSetOutFormat(PDF_8BIT, 0);
 		PicoDrawSetOutBuf(Pico.est.Draw2FB, 328);
 		break;
 	case RT_8BIT_FAST:
 		PicoIn.opt |=  POPT_ALT_RENDERER;
-		PicoIn.opt |=  POPT_DIS_32C_BORDER;
 		PicoDrawSetOutFormat(PDF_NONE, 0);
 		break;
 	}
 
 	if (PicoIn.AHW & PAHW_32X)
-		PicoDrawSetOutBuf(get_16bit_start(g_screen_ptr), g_screen_ppitch * 2);
-
+		PicoDrawSetOutBuf(screen_buffer(g_screen_ptr), g_screen_ppitch * 2);
 	Pico.m.dirtyPal = 1;
 }
 
@@ -196,19 +285,6 @@ void plat_update_volume(int has_changed, int is_up)
 {
 }
 
-void pemu_forced_frame(int no_scale, int do_emu)
-{
-	unsigned short *pd = get_16bit_start(g_screen_ptr);
-
-	PicoIn.opt &= ~POPT_DIS_32C_BORDER;
-	PicoDrawSetCallbacks(NULL, NULL);
-	Pico.m.dirtyPal = 1;
-
-	emu_cmn_forced_frame(no_scale, do_emu, pd);
-
-	g_menubg_src_ptr = g_screen_ptr;
-}
-
 void pemu_sound_start(void)
 {
 	emu_sound_start();
@@ -218,15 +294,136 @@ void plat_debug_cat(char *str)
 {
 }
 
-void emu_video_mode_change(int start_line, int line_count, int is_32cols)
+void pemu_forced_frame(int no_scale, int do_emu)
 {
+	int hs = currentConfig.scaling, vs = currentConfig.vscaling;
+
+	// create centered and sw scaled (if scaling enabled) 16 bit output
+	PicoIn.opt &= ~POPT_DIS_32C_BORDER;
+	Pico.m.dirtyPal = 1;
+	if (currentConfig.scaling)  currentConfig.scaling  = EOPT_SCALE_SW;
+	if (currentConfig.vscaling) currentConfig.vscaling = EOPT_SCALE_SW;
+	plat_video_set_size(g_menuscreen_w, g_menuscreen_h);
+
+	// render a frame in 16 bit mode
+	render_bg = 1;
+	emu_cmn_forced_frame(no_scale, do_emu, screen_buffer(g_screen_ptr));
+	render_bg = 0;
+
+	g_menubg_src_ptr = g_screen_ptr;
+	currentConfig.scaling = hs, currentConfig.vscaling = vs;
+}
+
+/* vertical sw scaling, 16 bit mode */
+static int vscale_state;
+
+static int cb_vscaling_begin(unsigned int line)
+{
+	// at start of new frame?
+	if (line <= out_y) {
+		// set y frame offset (see emu_video_mode_change)
+		Pico.est.DrawLineDest = screen_buffer(g_screen_ptr) +
+				(out_y * g_screen_ppitch /*+ out_x*/);
+		vscale_state = 0;
+		return out_y - line;
+	} else if (line > out_y + out_h)
+		return 1;
+
+	return 0;
+}
+
+static int cb_vscaling_nop(unsigned int line)
+{
+	return 0;
+}
+
+static int cb_vscaling_end(unsigned int line)
+{
+	u16 *dest = (u16 *)Pico.est.DrawLineDest + out_x;
+	// helpers for 32 bit operation (2 pixels at once):
+	u32 *dest32 = (u32 *)dest;
+	int pp = g_screen_ppitch;
+
+	if (out_h == 144)
+	  switch (currentConfig.filter) {
+	  case 0: v_upscale_nn_3_5(dest32, pp/2, out_w/2, vscale_state);
+		  break;
+	  default: v_upscale_snn_3_5(dest32, pp/2, out_w/2, vscale_state);
+		  break;
+	  }
+	else
+	  switch (currentConfig.filter) {
+	  case 3: v_upscale_bl4_16_17(dest32, pp/2, out_w/2, vscale_state);
+		  break;
+	  case 2: v_upscale_bl2_16_17(dest32, pp/2, out_w/2, vscale_state);
+		  break;
+	  case 1: v_upscale_snn_16_17(dest32, pp/2, out_w/2, vscale_state);
+		  break;
+	  default: v_upscale_nn_16_17(dest32, pp/2, out_w/2, vscale_state);
+		  break;
+	  }
+	Pico.est.DrawLineDest = (u16 *)dest32 - out_x;
+	return 0;
+}
+
+void emu_video_mode_change(int start_line, int line_count, int start_col, int col_count)
+{
+	// relative position in core fb and screen fb
+	out_y = start_line; out_x = start_col;
+	out_h = line_count; out_w = col_count;
+
+	PicoDrawSetCallbacks(NULL, NULL);
+	// center output in screen
+	screen_w = g_screen_width,  screen_x = (screen_w - out_w)/2;
+	screen_h = g_screen_height, screen_y = (screen_h - out_h)/2;
+
+	switch (currentConfig.scaling) {
+	case EOPT_SCALE_HW:
+		screen_w = out_w;
+		screen_x = 0;
+		break;
+	case EOPT_SCALE_SW:
+		screen_x = (screen_w - 320)/2;
+		break;
+	}
+	switch (currentConfig.vscaling) {
+	case EOPT_SCALE_HW:
+		screen_h = (out_h < 224 && out_h > 144 ? 224 : out_h);
+		screen_y = 0;
+		// NTSC always has 224 visible lines, anything smaller has bars
+		if (out_h < 224 && out_h > 144)
+			screen_y += (224 - out_h)/2;
+		// handle vertical centering for 16 bit mode
+		if (is_16bit_mode())
+			PicoDrawSetCallbacks(cb_vscaling_begin,cb_vscaling_nop);
+		break;
+	case EOPT_SCALE_SW:
+		screen_y = (screen_h - 240)/2 + (out_h < 240 && out_h > 144);
+		// NTSC always has 224 visible lines, anything smaller has bars
+		if (out_h < 224 && out_h > 144)
+			screen_y += (224 - out_h)/2;
+		// in 16 bit mode sw scaling is divided between core and platform
+		if (is_16bit_mode() && out_h < 240)
+			PicoDrawSetCallbacks(cb_vscaling_begin,cb_vscaling_end);
+		break;
+	}
+
+	if (screen_w != g_screen_width || screen_h != g_screen_height)
+		plat_video_set_size(screen_w, screen_h);
+	plat_video_set_buffer(g_screen_ptr);
+
+	// create a backing buffer for emulating the bad GG lcd display
+	if (currentConfig.ghosting && out_h == 144) {
+		int h = currentConfig.vscaling == EOPT_SCALE_SW ? 240:out_h;
+		int w = currentConfig.scaling == EOPT_SCALE_SW ? 320:out_w;
+		ghost_buf = realloc(ghost_buf, w * h * 2);
+		memset(ghost_buf, 0, w * h * 2);
+	}
+
 	// clear whole screen in all buffers
 	if (!is_16bit_mode())
 		memset32(Pico.est.Draw2FB, 0xe0e0e0e0, (320+8) * (8+240+8) / 4);
 	plat_video_clear_buffers();
-
-	out_y = start_line; out_x = (is_32cols ? 32 : 0);
-	out_h = line_count; out_w = (is_32cols ? 256:320);
 }
 
 void pemu_loop_prep(void)
@@ -239,6 +436,10 @@ void pemu_loop_end(void)
 {
 	/* do one more frame for menu bg */
 	pemu_forced_frame(0, 1);
+	if (ghost_buf) {
+		free(ghost_buf);
+		ghost_buf = NULL;
+	}
 }
 
 void plat_wait_till_us(unsigned int us_to)

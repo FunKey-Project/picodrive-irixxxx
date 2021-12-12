@@ -1182,10 +1182,10 @@ PICO_INTERNAL void PicoMemSetupCD(void)
 
   // setup FAME fetchmap
   {
-#ifdef __clang__
+#if defined __clang__ || defined HW_WUP
     volatile // prevent strange relocs from clang
 #endif
-    unsigned long ptr_ram = (uptr)PicoMem.ram;
+    uptr ptr_ram = (uptr)PicoMem.ram;
     int i;
 
     // M68k

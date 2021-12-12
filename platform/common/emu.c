@@ -219,6 +219,16 @@ static const char *find_bios(int *region, const char *cd_fname)
 		strcat(static_buff, ".zip");
 		f = fopen(static_buff, "rb");
 		if (f) break;
+
+		strcpy(static_buff, files[i]);
+		strcat(static_buff, ".bin");
+		f = fopen(static_buff, "rb");
+		if (f) break;
+
+		static_buff[strlen(static_buff) - 4] = 0;
+		strcat(static_buff, ".zip");
+		f = fopen(static_buff, "rb");
+		if (f) break;
 	}
 
 	/** Check Bios files in <rom path>/bios */
@@ -416,6 +426,10 @@ static void system_announce(void)
 
 	if (PicoIn.AHW & PAHW_SMS) {
 		sys_name = "Master System";
+		if (Pico.m.hardware & 0x1)
+			sys_name = "Game Gear";
+		else if (Pico.m.hardware & 0x4)
+			sys_name = "Mark III";
 #ifdef NO_SMS
 		extra = " [no support]";
 #endif
@@ -586,6 +600,9 @@ int emu_reload_rom(const char *rom_fname_in)
 	}
 	else
 	{
+		PicoSetInputDevice(0, currentConfig.input_dev0);
+		PicoSetInputDevice(1, currentConfig.input_dev1);
+
 		system_announce();
 		PicoIn.opt &= ~POPT_DIS_VDP_FIFO;
 	}
@@ -687,14 +704,16 @@ void emu_prep_defconfig(void)
 {
 	memset(&defaultConfig, 0, sizeof(defaultConfig));
 	defaultConfig.EmuOpt    = EOPT_EN_SRAM | EOPT_EN_SOUND | EOPT_16BPP |
-				  EOPT_GZIP_SAVES | 0x10/*?*/;
-	defaultConfig.s_PicoOpt = POPT_EN_YM2413|POPT_EN_STEREO|POPT_EN_FM|POPT_EN_PSG|POPT_EN_Z80 |
+				  EOPT_EN_CD_LEDS | EOPT_GZIP_SAVES | 0x10/*?*/;
+	defaultConfig.s_PicoOpt = POPT_EN_YM2413|POPT_EN_GG_LCD |
+				  POPT_EN_STEREO|POPT_EN_FM|POPT_EN_PSG|POPT_EN_Z80 |
 				  POPT_EN_MCD_PCM|POPT_EN_MCD_CDDA|POPT_EN_MCD_GFX |
 				  POPT_EN_DRC|POPT_ACC_SPRITES |
 				  POPT_EN_32X|POPT_EN_PWM;
 	defaultConfig.s_PsndRate = 44100;
 	defaultConfig.s_PicoRegion = 0; // auto
 	defaultConfig.s_PicoAutoRgnOrder = 0x184; // US, EU, JP
+	defaultConfig.s_hwSelect = PHWS_AUTO;
 	defaultConfig.s_PicoCDBuffers = 0;
 	defaultConfig.s_PicoSndFilterAlpha = 0x10000 * 60 / 100;
 	defaultConfig.confirm_save = EOPT_CONFIRM_SAVE;
@@ -721,6 +740,7 @@ void emu_set_defconfig(void)
 	PicoIn.sndRate = currentConfig.s_PsndRate;
 	PicoIn.regionOverride = currentConfig.s_PicoRegion;
 	PicoIn.autoRgnOrder = currentConfig.s_PicoAutoRgnOrder;
+	PicoIn.hwSelect = currentConfig.s_hwSelect;
 	PicoIn.sndFilterAlpha = currentConfig.s_PicoSndFilterAlpha;
 }
 
@@ -1504,7 +1524,7 @@ void emu_cmn_forced_frame(int no_scale, int do_emu, void *buf)
 		memset32((short *)g_screen_ptr + g_screen_ppitch * y, 0,
 			 g_screen_width * 2 / 4);
 
-	PicoIn.opt &= ~POPT_ALT_RENDERER;
+	PicoIn.opt &= ~(POPT_ALT_RENDERER|POPT_EN_SOFTSCALE);
 	PicoIn.opt |= POPT_ACC_SPRITES;
 	if (!no_scale && currentConfig.scaling)
 		PicoIn.opt |= POPT_EN_SOFTSCALE;
@@ -1683,6 +1703,7 @@ static void emu_loop_prep(void)
 /* our tick here is 1 us right now */
 #define ms_to_ticks(x) (unsigned int)(x * 1000)
 #define get_ticks() plat_get_ticks_us()
+#define vsync_delay_x3	3*ms_to_ticks(1)
 
 void emu_loop(void)
 {
@@ -1758,19 +1779,6 @@ void emu_loop(void)
 		// second changed?
 		if (timestamp_x3 - timestamp_fps_x3 >= ms_to_ticks(1000) * 3)
 		{
-
-#define FUNKEY_RESYNCHRONIZE_AUDIO_SECS	(5*60)
-#ifdef FUNKEY_RESYNCHRONIZE_AUDIO_SECS
-			static unsigned int last_resync = 0, cur_sec=0;
-			if(cur_sec++ - last_resync >= FUNKEY_RESYNCHRONIZE_AUDIO_SECS){
-				last_resync = cur_sec;
-
-				/** Resync here (same as quitting ans relaunching loop for now) */
-				printf("Resync sound now\n");
-				emu_sound_stop();
-				pemu_sound_start();
-			}
-#endif //FUNKEY_RESYNCHRONIZE_AUDIO_SECS
 
 #ifdef BENCHMARK
 			static int bench = 0, bench_fps = 0, bench_fps_s = 0, bfp = 0, bf[4];
@@ -1860,13 +1868,13 @@ void emu_loop(void)
 			diff = timestamp_aim_x3 - timestamp * 3;
 
 			// sleep or vsync if we are still too fast
-			if (diff > target_frametime_x3 && (currentConfig.EmuOpt & EOPT_VSYNC)) {
+			if (diff > target_frametime_x3 + vsync_delay_x3 && (currentConfig.EmuOpt & EOPT_VSYNC)) {
 				// we are too fast
 				plat_video_wait_vsync();
 				timestamp = get_ticks();
 				diff = timestamp * 3 - timestamp_aim_x3;
 			}
-			if (diff > target_frametime_x3) {
+			if (diff > target_frametime_x3 + vsync_delay_x3) {
 				// still too fast
 				plat_wait_till_us(timestamp + (diff - target_frametime_x3) / 3);
 			}

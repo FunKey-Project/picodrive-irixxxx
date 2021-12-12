@@ -119,8 +119,9 @@ void NOINLINE p32x_sh2_poll_detect(u32 a, SH2 *sh2, u32 flags, int maxcnt)
   // reading 2 consecutive 16bit values is probably a 32bit access. detect this
   // by checking address (max 2 bytes away) and cycles (max 2 cycles later).
   // no polling if more than 20 cycles have passed since last detect call.
-  if (a - sh2->poll_addr <= 2 && CYCLES_GE(10, cycles_diff)) {
-    if (CYCLES_GT(cycles_diff, 2) && ++sh2->poll_cnt >= maxcnt) {
+  if (a - sh2->poll_addr <= 2 && CYCLES_GE(20, cycles_diff)) {
+    if (!sh2_not_polling(sh2) && CYCLES_GT(cycles_diff, 2) &&
+                ++sh2->poll_cnt >= maxcnt) {
       if (!(sh2->state & flags))
         elprintf_sh2(sh2, EL_32X, "state: %02x->%02x",
           sh2->state, sh2->state | flags);
@@ -144,6 +145,7 @@ void NOINLINE p32x_sh2_poll_detect(u32 a, SH2 *sh2, u32 flags, int maxcnt)
     sh2->poll_addr = a;
   }
   sh2->poll_cycles = cycles_done;
+  sh2_set_polling(sh2);
 }
 
 void NOINLINE p32x_sh2_poll_event(SH2 *sh2, u32 flags, u32 m68k_cycles)
@@ -511,16 +513,17 @@ static void p32x_reg_write8(u32 a, u32 d)
     case 0x2d:
     case 0x2e:
     case 0x2f:
-      if (REG8IN16(r, a) != (u8)d) {
-        unsigned int cycles = SekCyclesDone();
+      { unsigned int cycles = SekCyclesDone();
 
         if (CYCLES_GT(cycles - msh2.m68krcycles_done, 64))
           p32x_sync_sh2s(cycles);
 
-        REG8IN16(r, a) = d;
-        p32x_sh2_poll_event(&sh2s[0], SH2_STATE_CPOLL, cycles);
-        p32x_sh2_poll_event(&sh2s[1], SH2_STATE_CPOLL, cycles);
-        sh2_poll_write(a & ~1, r[a / 2], cycles, NULL);
+        if (REG8IN16(r, a) != (u8)d) {
+          REG8IN16(r, a) = d;
+          p32x_sh2_poll_event(&sh2s[0], SH2_STATE_CPOLL, cycles);
+          p32x_sh2_poll_event(&sh2s[1], SH2_STATE_CPOLL, cycles);
+          sh2_poll_write(a & ~1, r[a / 2], cycles, NULL);
+        }
       }
       return;
     case 0x30:
@@ -608,16 +611,17 @@ static void p32x_reg_write16(u32 a, u32 d)
     case 0x2a/2:
     case 0x2c/2:
     case 0x2e/2:
-      if (r[a / 2] != (u16)d) {
-        unsigned int cycles = SekCyclesDone();
+      { unsigned int cycles = SekCyclesDone();
 
         if (CYCLES_GT(cycles - msh2.m68krcycles_done, 64))
           p32x_sync_sh2s(cycles);
 
-        r[a / 2] = d;
-        p32x_sh2_poll_event(&sh2s[0], SH2_STATE_CPOLL, cycles);
-        p32x_sh2_poll_event(&sh2s[1], SH2_STATE_CPOLL, cycles);
-        sh2_poll_write(a, (u16)d, cycles, NULL);
+        if (r[a / 2] != (u16)d) {
+          r[a / 2] = d;
+          p32x_sh2_poll_event(&sh2s[0], SH2_STATE_CPOLL, cycles);
+          p32x_sh2_poll_event(&sh2s[1], SH2_STATE_CPOLL, cycles);
+          sh2_poll_write(a, (u16)d, cycles, NULL);
+        }
       }
       return;
     case 0x30/2: // PWM control
@@ -1457,7 +1461,7 @@ static u32 REGPARM(2) sh2_read8_cs0(u32 a, SH2 *sh2)
 
   if ((a & 0x3fff0) == 0x4100) {
     d = p32x_vdp_read16(a);
-    p32x_sh2_poll_detect(a, sh2, SH2_STATE_VPOLL, 7);
+    p32x_sh2_poll_detect(a, sh2, SH2_STATE_VPOLL, 9);
     goto out_16to8;
   }
 
@@ -1520,7 +1524,7 @@ static u32 REGPARM(2) sh2_read16_cs0(u32 a, SH2 *sh2)
 
   if ((a & 0x3fff0) == 0x4100) {
     d = p32x_vdp_read16(a);
-    p32x_sh2_poll_detect(a, sh2, SH2_STATE_VPOLL, 7);
+    p32x_sh2_poll_detect(a, sh2, SH2_STATE_VPOLL, 9);
     goto out;
   }
 
@@ -1864,7 +1868,7 @@ static void REGPARM(3) sh2_write32_rom(u32 a, u32 d, SH2 *sh2)
   sh2_write16_rom(a + 2, d, sh2);
 }
 
-typedef u32 (sh2_read_handler)(u32 a, SH2 *sh2);
+typedef u32 REGPARM(2) (sh2_read_handler)(u32 a, SH2 *sh2);
 typedef void REGPARM(3) (sh2_write_handler)(u32 a, u32 d, SH2 *sh2);
 
 #define SH2MAP_ADDR2OFFS_R(a) \
@@ -1995,11 +1999,7 @@ int p32x_sh2_memcpy(u32 dst, u32 src, int count, int size, SH2 *sh2)
     u16 dl, dh = *sp++;
     for (i = 0; i < (len & ~1); i += 2, dst += 2, sp++) {
       dl = dh, dh = *sp;
-#if CPU_IS_LE
       p32x_sh2_write16(dst, (dh >> 8) | (dl << 8), sh2);
-#else
-      p32x_sh2_write16(dst, (dl >> 8) | (dh << 8), sh2);
-#endif
     }
     if (len & 1)
       p32x_sh2_write8(dst, dh, sh2);
@@ -2031,7 +2031,7 @@ int p32x_sh2_memcpy(u32 dst, u32 src, int count, int size, SH2 *sh2)
       dst += 2;
     }
     if (len & 1)
-      p32x_sh2_write8(dst, ((u8 *)sp)[MEM_BE2(0)], sh2);
+      p32x_sh2_write8(dst, *sp >> 8, sh2);
   }
 
   return count;
@@ -2382,9 +2382,10 @@ void PicoMemSetup32x(void)
   msh2_write32_map[0x00/2] = msh2_write32_map[0x20/2] = sh2_write32_cs0;
   // CS1 - ROM
   bank_switch_rom_sh2();
-  msh2_read8_map[0x02/2].mask  = msh2_read8_map[0x22/2].mask  = 0x3fffff; // FIXME
-  msh2_read16_map[0x02/2].mask = msh2_read16_map[0x22/2].mask = 0x3ffffe; // FIXME
-  msh2_read32_map[0x02/2].mask = msh2_read32_map[0x22/2].mask = 0x3ffffc; // FIXME
+  for (rs = 0x8000; rs < Pico.romsize && rs < 0x400000; rs *= 2) ; 
+  msh2_read8_map[0x02/2].mask  = msh2_read8_map[0x22/2].mask  = rs-1;
+  msh2_read16_map[0x02/2].mask = msh2_read16_map[0x22/2].mask = rs-1;
+  msh2_read32_map[0x02/2].mask = msh2_read32_map[0x22/2].mask = rs-1;
   msh2_write16_map[0x02/2] = msh2_write16_map[0x22/2] = sh2_write16_rom;
   msh2_write32_map[0x02/2] = msh2_write32_map[0x22/2] = sh2_write32_rom;
   // CS2 - DRAM 

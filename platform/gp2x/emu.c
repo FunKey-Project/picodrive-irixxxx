@@ -83,6 +83,10 @@ void pemu_validate_config(void)
 
 static int get_renderer(void)
 {
+	if (doing_bg_frame)
+		return RT_16BIT;
+	if ((PicoIn.AHW & PAHW_SMS) && currentConfig.renderer == RT_8BIT_FAST)
+		return RT_8BIT_ACC;	// 8bpp fast is not there (yet?)
 	if (PicoIn.AHW & PAHW_32X)
 		return currentConfig.renderer32x;
 	else
@@ -105,7 +109,7 @@ static void change_renderer(int diff)
 }
 
 #define is_16bit_mode() \
-	(currentConfig.renderer == RT_16BIT || (PicoIn.AHW & PAHW_32X))
+	(currentConfig.renderer == RT_16BIT || (PicoIn.AHW & PAHW_32X) || doing_bg_frame)
 
 static void (*osd_text)(int x, int y, const char *text);
 
@@ -248,12 +252,15 @@ static int EmuScanEnd8_rot(unsigned int num)
 
 /* line doublers */
 static unsigned int ld_counter;
-static int ld_left, ld_lines;
+static int ld_left, ld_lines; // numbers in Q1 format
 
 static int EmuScanBegin16_ld(unsigned int num)
 {
-	if ((signed int)(ld_counter - num) > 100)
-		ld_counter = 0;
+	if ((signed int)(ld_counter - num) > 100) {
+		// vsync, offset so that the upscaled image is centered
+		ld_counter = 120 - (120-num) * (ld_lines+2)/ld_lines;
+		ld_left = ld_lines;
+	}
 
 	if (emu_scan_begin)
 		return emu_scan_begin(ld_counter);
@@ -271,9 +278,9 @@ static int EmuScanEnd16_ld(unsigned int num)
 		emu_scan_end(ld_counter);
 
 	ld_counter++;
-	ld_left--;
+	ld_left -= 2;
 	if (ld_left <= 0) {
-		ld_left = ld_lines;
+		ld_left += ld_lines;
 
 		EmuScanBegin16_ld(num);
 		memcpy(Pico.est.DrawLineDest, oldline, 320 * gp2x_current_bpp / 8);
@@ -297,25 +304,26 @@ static int make_local_pal_md(int fast_mode)
 	int pallen = 0x100;
 
 	if (fast_mode) {
-		bgr444_to_rgb32(localPal, PicoMem.cram);
+		bgr444_to_rgb32(localPal, PicoMem.cram, 64);
 		pallen = 0x40;
 		Pico.m.dirtyPal = 0;
 	}
 	else if (Pico.est.rendstatus & PDRAW_SONIC_MODE) { // mid-frame palette changes
 		switch (Pico.est.SonicPalCount) {
-		case 3: bgr444_to_rgb32(localPal+0xc0, Pico.est.SonicPal+0xc0);
-		case 2: bgr444_to_rgb32(localPal+0x80, Pico.est.SonicPal+0x80);
-		case 1: bgr444_to_rgb32(localPal+0x40, Pico.est.SonicPal+0x40);
-		default:bgr444_to_rgb32(localPal, Pico.est.SonicPal);
+		case 3: bgr444_to_rgb32(localPal+0xc0, Pico.est.SonicPal+0xc0, 64);
+		case 2: bgr444_to_rgb32(localPal+0x80, Pico.est.SonicPal+0x80, 64);
+		case 1: bgr444_to_rgb32(localPal+0x40, Pico.est.SonicPal+0x40, 64);
+		default:bgr444_to_rgb32(localPal, Pico.est.SonicPal, 64);
 		}
 		pallen = (Pico.est.SonicPalCount+1)*0x40;
 	}
 	else if (Pico.video.reg[0xC] & 8) { // shadow/hilight mode
-		bgr444_to_rgb32(localPal, Pico.est.SonicPal);
+		bgr444_to_rgb32(localPal, Pico.est.SonicPal, 64);
 		bgr444_to_rgb32_sh(localPal, Pico.est.SonicPal);
+		memcpy(localPal+0xc0, localPal, 0x40*4); // for spr prio mess
 	}
 	else {
-		bgr444_to_rgb32(localPal, Pico.est.SonicPal);
+		bgr444_to_rgb32(localPal, Pico.est.SonicPal, 64);
 		memcpy(localPal+0x40, localPal, 0x40*4); // for spr prio mess
 		memcpy(localPal+0x80, localPal, 0x80*4); // for spr prio mess
 	}
@@ -331,20 +339,27 @@ static int make_local_pal_md(int fast_mode)
 
 static int make_local_pal_sms(int fast_mode)
 {
-	unsigned short *spal = PicoMem.cram;
-	unsigned int *dpal = (void *)localPal;
-	unsigned int i, t;
-
-	for (i = 0x40; i > 0; i--) {
-		t = *spal++;
-		t = ((t & 0x0003) << 22) | ((t & 0x000c) << 12) | ((t & 0x0030) << 2);
-		t |= t >> 2;
-		t |= t >> 4;
-		*dpal++ = t;
+	static u16 tmspal[32] = {
+		// SMS palette for TMS modes
+		0x0000, 0x0000, 0x00a0, 0x00f0, 0x0500, 0x0f00, 0x0005, 0x0ff0,
+		0x000a, 0x000f, 0x0055, 0x00ff, 0x0050, 0x0f0f, 0x0555, 0x0fff,
+	};
+	int i;
+	
+	if (!(Pico.video.reg[0] & 0x4)) {
+		for (i = Pico.est.SonicPalCount; i >= 0; i--) {
+			bgr444_to_rgb32(localPal+i*0x40, tmspal, 32);
+			memcpy(localPal+i*0x40+0x20, localPal+i*0x40, 0x20*4);
+		}
+	} else {
+		for (i = Pico.est.SonicPalCount; i >= 0; i--) {
+			bgr444_to_rgb32(localPal+i*0x40, Pico.est.SonicPal+i*0x40, 32);
+			memcpy(localPal+i*0x40+0x20, localPal+i*0x40, 0x20*4);
+		}
 	}
-
-	Pico.m.dirtyPal = 0;
-	return 0x40;
+	if (Pico.m.dirtyPal == 2)
+		Pico.m.dirtyPal = 0;
+	return (Pico.est.SonicPalCount+1)*0x40;
 }
 
 void pemu_finalize_frame(const char *fps, const char *notice)
@@ -401,7 +416,7 @@ void plat_video_flip(void)
 		stride *= 2;
 	// the fast renderer has overlap areas and can't directly render to
 	// screen buffers. Its output is copied to screen in finalize_frame
-	if (currentConfig.renderer != RT_8BIT_FAST || (PicoIn.AHW & PAHW_32X))
+	if (get_renderer() != RT_8BIT_FAST || (PicoIn.AHW & PAHW_32X))
 		PicoDrawSetOutBuf(g_screen_ptr, stride);
 }
 
@@ -486,9 +501,13 @@ static void vid_reset_mode(void)
 	int gp2x_mode = 16;
 	int renderer = get_renderer();
 
-	PicoIn.opt &= ~POPT_ALT_RENDERER;
-	emu_scan_begin = NULL;
-	emu_scan_end = NULL;
+	PicoIn.opt &= ~(POPT_ALT_RENDERER|POPT_DIS_32C_BORDER|POPT_EN_SOFTSCALE);
+	if (currentConfig.scaling == EOPT_SCALE_SW) {
+		PicoIn.opt |= POPT_EN_SOFTSCALE;
+		PicoIn.filter = EOPT_FILTER_BILINEAR2;
+	} else if (currentConfig.scaling == EOPT_SCALE_HW)
+		// hw scaling, render without any padding
+		PicoIn.opt |= POPT_DIS_32C_BORDER;
 
 	switch (renderer) {
 	case RT_16BIT:
@@ -519,6 +538,9 @@ static void vid_reset_mode(void)
 		PicoDrawSetOutBuf(g_screen_ptr, g_screen_width * 2);
 		gp2x_mode = 16;
 	}
+
+	emu_scan_begin = NULL;
+	emu_scan_end = NULL;
 
 	if (currentConfig.EmuOpt & EOPT_WIZ_TEAR_FIX) {
 		if ((PicoIn.AHW & PAHW_32X) || renderer == RT_16BIT) {
@@ -557,18 +579,26 @@ static void vid_reset_mode(void)
 
 	Pico.m.dirtyPal = 1;
 
-	PicoIn.opt &= ~POPT_EN_SOFTSCALE;
-	if (currentConfig.scaling == EOPT_SCALE_SW)
-		PicoIn.opt |= POPT_EN_SOFTSCALE;
-
 	// palette converters for 8bit modes
 	make_local_pal = (PicoIn.AHW & PAHW_SMS) ? make_local_pal_sms : make_local_pal_md;
 }
 
-void emu_video_mode_change(int start_line, int line_count, int is_32cols)
+void emu_video_mode_change(int start_line, int line_count, int start_col, int col_count)
 {
 	int scalex = 320, scaley = 240;
 	int ln_offs = 0;
+
+	/* NTSC always has 224 visible lines, anything smaller has bars */
+	if (line_count < 224 && line_count > 144) {
+		start_line -= (224-line_count) /2;
+		line_count = 224;
+	}
+
+	/* line doubling for swscaling, also needed for bg frames */
+	if (currentConfig.vscaling == EOPT_SCALE_SW && line_count < 240) {
+		ld_lines = ld_left = 2*line_count / (240 - line_count);
+		PicoDrawSetCallbacks(EmuScanBegin16_ld, EmuScanEnd16_ld);
+	}
 
 	if (doing_bg_frame)
 		return;
@@ -577,11 +607,9 @@ void emu_video_mode_change(int start_line, int line_count, int is_32cols)
 	osd_y = 232;
 
 	/* set up hwscaling here */
-	PicoIn.opt &= ~POPT_DIS_32C_BORDER;
-	if (is_32cols && currentConfig.scaling == EOPT_SCALE_HW) {
-		scalex = 256;
-		PicoIn.opt |= POPT_DIS_32C_BORDER;
-		osd_fps_x = OSD_FPS_X - 64;
+	if (col_count < 320 && currentConfig.scaling == EOPT_SCALE_HW) {
+		scalex = col_count;
+		osd_fps_x = col_count - (320-OSD_FPS_X);
 	}
 
 	if (currentConfig.vscaling == EOPT_SCALE_HW) {
@@ -592,11 +620,6 @@ void emu_video_mode_change(int start_line, int line_count, int is_32cols)
 
 	gp2x_video_RGB_setscaling(ln_offs, scalex, scaley);
 
-	/* line doubling */
-	if (currentConfig.vscaling == EOPT_SCALE_SW && line_count < 240) {
-		ld_lines = ld_left = line_count / (240 - line_count);
-		PicoDrawSetCallbacks(EmuScanBegin16_ld, EmuScanEnd16_ld);
-	}
 
 	// clear whole screen in all buffers
 	if (!is_16bit_mode())
@@ -729,6 +752,8 @@ void pemu_forced_frame(int no_scale, int do_emu)
 	doing_bg_frame = 1;
 	PicoDrawSetCallbacks(NULL, NULL);
 	Pico.m.dirtyPal = 1;
+	PicoIn.opt &= ~POPT_DIS_32C_BORDER;
+	gp2x_current_bpp = 16;
 
 	if (!no_scale)
 		no_scale = currentConfig.scaling == EOPT_SCALE_NONE;
@@ -747,6 +772,7 @@ void plat_video_loop_prepare(void)
 	// make sure we are in correct mode
 	change_renderer(0);
 	vid_reset_mode();
+	rendstatus_old = -1;
 }
 
 void pemu_loop_prep(void)

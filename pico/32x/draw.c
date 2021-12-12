@@ -8,6 +8,14 @@
  */
 #include "../pico_int.h"
 
+// NB: 32X officially doesn't support H32 mode. However, it does work since the
+// cartridge slot carries the EDCLK signal which is always H40 clock and is used
+// as video clock by the 32X. The H32 MD image is overlayed with the 320 px 32X
+// image which has the same on-screen width. How the /YS signal on the cartridge
+// slot (signalling the display of background color) is processed in this case
+// is however unclear and might lead to glitches due to race conditions by the
+// different video clocks for H32 and H40.
+
 // BGR555 to native conversion
 #if defined(USE_BGR555)
 #define PXCONV(t)   ((t)&(mr|mg|mb|mp))
@@ -122,8 +130,6 @@ void FinalizeLine32xRGB555(int sh, int line, struct PicoEState *est)
   FinalizeLine555(sh, line, est);
 
   if ((Pico32x.vdp_regs[0] & P32XV_Mx) == 0 || // 32x blanking
-      // XXX: how is 32col mode hadled by real hardware?
-      !(Pico.video.reg[12] & 1) || // 32col mode
       (Pico.video.debug_p & PVD_KILL_32X))
   {
     return;
@@ -162,6 +168,7 @@ void FinalizeLine32xRGB555(int sh, int line, struct PicoEState *est)
 
 #define PICOSCAN_POST \
   PicoScan32xEnd(l + (lines_sft_offs & 0xff)); \
+  Pico.est.DrawLineDest = (char *)Pico.est.DrawLineDest + DrawLineDestIncrement32x; \
 
 #define make_do_loop(name, pre_code, post_code, md_code)        \
 /* Direct Color Mode */                                         \
@@ -260,6 +267,7 @@ void PicoDraw32xLayer(int offs, int lines, int md_bg)
   int which_func;
 
   Pico.est.DrawLineDest = (char *)DrawLineDestBase32x + offs * DrawLineDestIncrement32x;
+  Pico.est.DrawLineDestIncr = DrawLineDestIncrement32x;
   dram = Pico32xMem->dram[Pico32x.vdp_regs[0x0a/2] & P32XV_FS];
 
   if (Pico32xDrawMode == PDM32X_BOTH)
@@ -308,14 +316,6 @@ void PicoDraw32xLayerMdOnly(int offs, int lines)
   int poffs = 0, plen = 320;
   int l, p;
 
-  if (!(Pico.video.reg[12] & 1)) {
-    // 32col mode. for some render modes MD pixel data carries an offset
-    if (!(PicoIn.opt & POPT_DIS_32C_BORDER))
-      pmd += 32;
-    poffs = 32;
-    plen = 256;
-  }
-
   PicoDrawUpdateHighPal();
 
   dst += poffs;
@@ -330,7 +330,7 @@ void PicoDraw32xLayerMdOnly(int offs, int lines)
       dst[p + 2] = pal[*pmd++];
       dst[p + 3] = pal[*pmd++];
     }
-    dst = (void *)((char *)dst + DrawLineDestIncrement32x);
+    dst = Pico.est.DrawLineDest = (char *)dst + DrawLineDestIncrement32x;
     pmd += 328 - plen;
     if (have_scan)
       PicoScan32xEnd(l + offs);
@@ -348,6 +348,9 @@ void PicoDrawSetOutFormat32x(pdso_t which, int use_32x_line_mode)
     PicoDrawSetInternalBuf(NULL, 0);
     PicoDrawSetOutBufMD(Pico.est.Draw2FB, 328);
   }
+  // always need upscaling for H32, before mixing in 32X layer
+  PicoIn.opt |= POPT_EN_SOFTSCALE;
+  PicoIn.opt &= ~POPT_DIS_32C_BORDER;
 
   if (use_32x_line_mode)
     // we'll draw via FinalizeLine32xRGB555 (rare)

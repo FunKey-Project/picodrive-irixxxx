@@ -9,6 +9,7 @@
 *.dylib
 *.so
 *.a
+*.opk
 tags
 cscope.out
 config.mak
@@ -26,7 +27,6 @@ libs/
 obj/
 .opk_data
 PicoDrive
-PicoDrive.opk
 pico_int_offs.h
 amalgamate
 textfilter

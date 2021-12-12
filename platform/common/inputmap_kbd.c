@@ -108,19 +108,16 @@ const struct in_default_bind in_sdl_defbinds_SMS[] = {
 };
 
 const struct menu_keymap in_sdl_key_map[] = {
-	{ SDLK_UP,	PBTN_UP },
-	{ SDLK_DOWN,	PBTN_DOWN },
-	{ SDLK_LEFT,	PBTN_LEFT },
-	{ SDLK_RIGHT,	PBTN_RIGHT },
+	{ SDLK_u,	PBTN_UP },
+	{ SDLK_d,	PBTN_DOWN },
+	{ SDLK_l,	PBTN_LEFT },
+	{ SDLK_r,	PBTN_RIGHT },
 	{ SDLK_RETURN,	PBTN_MOK },
-	{ SDLK_ESCAPE,	PBTN_MBACK },
+	{ SDLK_b,	PBTN_MBACK },
 	{ SDLK_SEMICOLON,	PBTN_MA2 },
 	{ SDLK_QUOTE,	PBTN_MA3 },
-	{ SDLK_LEFTBRACKET,  PBTN_L },
-	{ SDLK_RIGHTBRACKET, PBTN_R },
-{ SDLK_COMMA,	PBTN_MA2 },
-{ SDLK_o,  PBTN_L },
-{ SDLK_p,  PBTN_R },
+	{ SDLK_m,  PBTN_L },
+	{ SDLK_n, PBTN_R },
 };
 const int in_sdl_key_map_sz = sizeof(in_sdl_key_map) / sizeof(in_sdl_key_map[0]);
 

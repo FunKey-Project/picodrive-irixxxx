@@ -180,7 +180,7 @@ extern struct DrZ80 drZ80;
 #define z80_run_nr(cycles) Cz80_Exec(&CZ80, cycles)
 #define z80_int()          Cz80_Set_IRQ(&CZ80, 0, HOLD_LINE)
 #define z80_int_assert(a)  Cz80_Set_IRQ(&CZ80, 0, (a) ? ASSERT_LINE : CLEAR_LINE)
-#define z80_nmi()          Cz80_Set_IRQ(&CZ80, IRQ_LINE_NMI, 0)
+#define z80_nmi()          Cz80_Set_IRQ(&CZ80, IRQ_LINE_NMI, ASSERT_LINE)
 
 #define z80_cyclesLeft     (CZ80.ICount - CZ80.ExtraCycles)
 #define z80_subCLeft(c)    CZ80.ICount -= c
@@ -199,7 +199,7 @@ extern struct DrZ80 drZ80;
 #define Z80_STATE_SIZE 0x60
 
 #define z80_resetCycles() \
-  Pico.t.z80c_cnt = Pico.t.z80c_aim = Pico.t.z80_scanline = 0
+  Pico.t.z80c_cnt -= Pico.t.z80c_aim, Pico.t.z80c_aim = Pico.t.z80_scanline = 0
 
 #define z80_cyclesDone() \
   (Pico.t.z80c_aim - z80_cyclesLeft)
@@ -224,6 +224,8 @@ extern SH2 sh2s[2];
 # define sh2_cycles_left(sh2) (sh2)->icount
 # define sh2_burn_cycles(sh2, n) (sh2)->icount -= n
 # define sh2_pc(sh2) (sh2)->ppc
+# define sh2_not_polling(sh2) (sh2)->no_polling
+# define sh2_set_polling(sh2) (sh2)->no_polling = 0
 #else
 # define sh2_end_run(sh2, after_) do { \
   int left_ = ((signed int)(sh2)->sr >> 12) - (after_); \
@@ -235,6 +237,8 @@ extern SH2 sh2s[2];
 # define sh2_cycles_left(sh2) ((signed int)(sh2)->sr >> 12)
 # define sh2_burn_cycles(sh2, n) (sh2)->sr -= ((n) << 12)
 # define sh2_pc(sh2) (sh2)->pc
+# define sh2_not_polling(sh2) ((sh2)->sr & SH2_NO_POLLING)
+# define sh2_set_polling(sh2) ((sh2)->sr &= ~SH2_NO_POLLING)
 #endif
 
 #define sh2_cycles_done(sh2) (unsigned)((int)(sh2)->cycles_timeslice - sh2_cycles_left(sh2))
@@ -338,12 +342,27 @@ struct PicoMisc
   unsigned int  frame_count;   // 1c for movies and idle det
 };
 
+#define PMS_MAP_AUTO	0
+#define PMS_MAP_SEGA	1
+#define PMS_MAP_CODEM	2
+#define PMS_MAP_KOREA	3
+#define PMS_MAP_MSX	4
+#define PMS_MAP_N32K	5
+#define PMS_MAP_N16K	6
+#define PMS_MAP_JANGGUN	7
+#define PMS_MAP_NEMESIS	8
+
 struct PicoMS
 {
   unsigned char carthw[0x10];
   unsigned char io_ctl;
   unsigned char nmi_state;
-  unsigned char pad[0x4e];
+  unsigned char mapper;
+  unsigned char fm_ctl;
+  unsigned char vdp_buffer;
+  unsigned char vdp_hlatch;
+  unsigned char io_gg[0x08];
+  unsigned char pad[0x42];
 };
 
 // emu state and data for the asm code
@@ -352,6 +371,7 @@ struct PicoEState
   int DrawScanline;
   int rendstatus;
   void *DrawLineDest;          // draw destination
+  int DrawLineDestIncr;
   unsigned char *HighCol;
   s32 *HighPreSpr;
   struct Pico *Pico;
@@ -417,6 +437,7 @@ struct PicoTiming
 
   unsigned int z80c_cnt;                // z80 cycles done (this frame)
   unsigned int z80c_aim;
+  unsigned int z80c_line_start;
   int z80_scanline;
 
   int timer_a_next_oflow, timer_a_step; // in z80 cycles
@@ -664,6 +685,7 @@ PICO_INTERNAL void PicoFrameStart(void);
 void PicoDrawSync(int to, int blank_last_line);
 void BackFill(int reg7, int sh, struct PicoEState *est);
 void FinalizeLine555(int sh, int line, struct PicoEState *est);
+void FinalizeLine8bit(int sh, int line, struct PicoEState *est);
 void PicoDrawSetOutBufMD(void *dest, int increment);
 extern int (*PicoScanBegin)(unsigned int num);
 extern int (*PicoScanEnd)(unsigned int num);
@@ -681,10 +703,11 @@ void PicoDraw2Init(void);
 PICO_INTERNAL void PicoFrameFull();
 
 // mode4.c
-void PicoFrameStartMode4(void);
-void PicoLineMode4(int line);
-void PicoDoHighPal555M4(void);
-void PicoDrawSetOutputMode4(pdso_t which);
+void PicoFrameStartSMS(void);
+void PicoParseSATSMS(int line);
+void PicoLineSMS(int line);
+void PicoDoHighPal555SMS(void);
+void PicoDrawSetOutputSMS(pdso_t which);
 
 // memory.c
 PICO_INTERNAL void PicoMemSetup(void);
@@ -909,9 +932,9 @@ PICO_INTERNAL void PsndExit(void);
 PICO_INTERNAL void PsndReset(void);
 PICO_INTERNAL void PsndStartFrame(void);
 PICO_INTERNAL void PsndDoDAC(int cycle_to);
-PICO_INTERNAL void PsndDoPSG(int line_to);
-PICO_INTERNAL void PsndDoYM2413(int line_to);
-PICO_INTERNAL void PsndDoFM(int line_to);
+PICO_INTERNAL void PsndDoPSG(int cyc_to);
+PICO_INTERNAL void PsndDoYM2413(int cyc_to);
+PICO_INTERNAL void PsndDoFM(int cyc_to);
 PICO_INTERNAL void PsndClear(void);
 PICO_INTERNAL void PsndGetSamples(int y);
 PICO_INTERNAL void PsndGetSamplesMS(int y);

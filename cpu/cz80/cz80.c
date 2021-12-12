@@ -196,10 +196,9 @@ void Cz80_Init(cz80_struc *CPU)
 	CPU->pzR16[0] = pzBC;
 	CPU->pzR16[1] = pzDE;
 	CPU->pzR16[2] = pzHL;
-	CPU->pzR16[3] = pzAF;
+	CPU->pzR16[3] = pzFA;
 
 	zIX = zIY = 0xffff;
-	zF = ZF;
 
 	CPU->Interrupt_Callback = Cz80_Interrupt_Callback;
 }
@@ -211,7 +210,8 @@ void Cz80_Init(cz80_struc *CPU)
 
 void Cz80_Reset(cz80_struc *CPU)
 {
-	memset(CPU, 0, (FPTR)&CPU->BasePC - (FPTR)CPU);
+	// I, R, CPU and interrupts logic is reset, registers are untouched
+	memset(&CPU->R, 0, (FPTR)&CPU->BasePC - (FPTR)&CPU->R);
 	Cz80_Set_Reg(CPU, CZ80_PC, 0);
 }
 
@@ -244,7 +244,6 @@ INT32 Cz80_Exec(cz80_struc *CPU, INT32 cycles)
 	UINT32 adr = 0;
 	UINT32 res;
 	UINT32 val;
-	int afterEI = 0;
 	union16 *data;
 
 	PC = CPU->PC;
@@ -254,33 +253,36 @@ INT32 Cz80_Exec(cz80_struc *CPU, INT32 cycles)
 	CPU->ICount = cycles - CPU->ExtraCycles;
 	CPU->ExtraCycles = 0;
 
-	if (!CPU->HaltState)
-	{
 Cz80_Exec:
-		if (CPU->ICount > 0)
+	if (CPU->Status)
+	{
+		if (CPU->Status & CZ80_HAS_NMI)
 		{
-Cz80_Exec_nocheck:
-			data = pzHL;
-			Opcode = READ_OP();
-#if CZ80_EMULATE_R_EXACTLY
-			zR++;
-#endif
-			#include "cz80_op.c"
+			zIFF1 = 0;
+			CPU->Status &= ~(CZ80_HALTED | CZ80_HAS_NMI);
+			CPU->ExtraCycles += 11;
+			PUSH_16(zRealPC);
+			SET_PC(0x66);
+		} else if (CPU->Status & CZ80_HAS_INT)
+		{
+			CHECK_INT
+		} else if (CPU->Status & CZ80_HALTED)
+		{
+			goto Cz80_Exec_End;
 		}
+		CPU->ICount -= CPU->ExtraCycles;
+		CPU->ExtraCycles = 0;
+	}
 
-		if (afterEI)
-		{
-			afterEI = 0;
-Cz80_Check_Interrupt:
-			if (CPU->IRQState != CLEAR_LINE)
-			{
-				CHECK_INT
-			}
-			CPU->ICount -= CPU->ExtraCycles;
-			CPU->ExtraCycles = 0;
-			if (!CPU->HaltState)
-				goto Cz80_Exec;
-		}
+	if (CPU->ICount > 0)
+	{
+Cz80_Exec_nocheck:
+		data = pzHL;
+		Opcode = READ_OP();
+#if CZ80_EMULATE_R_EXACTLY
+		zR++;
+#endif
+		#include "cz80_op.c"
 	}
 
 Cz80_Exec_End:
@@ -288,7 +290,7 @@ Cz80_Exec_End:
 #if CZ80_ENCRYPTED_ROM
 	CPU->OPBase = OPBase;
 #endif
-	if (!(CPU->HaltState && CPU->ICount > 0))
+	if (!((CPU->Status & CZ80_HALTED) && CPU->ICount > 0))
 		cycles -= CPU->ICount;
 	CPU->ICount = 0;
 #if !CZ80_EMULATE_R_EXACTLY
@@ -307,35 +309,22 @@ void Cz80_Set_IRQ(cz80_struc *CPU, INT32 line, INT32 state)
 {
 	if (line == IRQ_LINE_NMI)
 	{
-		zIFF1 = 0;
-		CPU->ExtraCycles += 11;
-		CPU->HaltState = 0;
-		PUSH_16(CPU->PC - CPU->BasePC)
-		Cz80_Set_Reg(CPU, CZ80_PC, 0x66);
-	}
-	else
+		if (state)
+			CPU->Status |= CZ80_HAS_NMI;
+		else
+			CPU->Status &= ~CZ80_HAS_NMI;
+	} else
 	{
+		CPU->IRQLine = line;
 		CPU->IRQState = state;
-
-		if (state != CLEAR_LINE)
+		if (state)
 		{
-			FPTR PC = CPU->PC;
-#if CZ80_ENCRYPTED_ROM
-			FPTR OPBase = CPU->OPBase;
-#endif
-
-			CPU->IRQLine = line;
-			CHECK_INT
-			CPU->PC = PC;
-#if CZ80_ENCRYPTED_ROM
-			CPU->OPBase = OPBase;
-#endif
+			if (zIFF1)
+				CPU->Status |= CZ80_HAS_INT;
+		} else
+		{
+			CPU->Status &= ~CZ80_HAS_INT;
 		}
-	}
-	if (CPU->ICount > 0)
-	{
-		CPU->ICount -= CPU->ExtraCycles;
-		CPU->ExtraCycles  = 0;
 	}
 }
 
@@ -350,13 +339,13 @@ UINT32 Cz80_Get_Reg(cz80_struc *CPU, INT32 regnum)
 	{
 	case CZ80_PC:   return (CPU->PC - CPU->BasePC);
 	case CZ80_SP:   return zSP;
-	case CZ80_AF:   return zAF;
+	case CZ80_FA:   return zFA;
 	case CZ80_BC:   return zBC;
 	case CZ80_DE:   return zDE;
 	case CZ80_HL:   return zHL;
 	case CZ80_IX:   return zIX;
 	case CZ80_IY:   return zIY;
-	case CZ80_AF2:  return zAF2;
+	case CZ80_FA2:  return zFA2;
 	case CZ80_BC2:  return zBC2;
 	case CZ80_DE2:  return zDE2;
 	case CZ80_HL2:  return zHL2;
@@ -365,7 +354,7 @@ UINT32 Cz80_Get_Reg(cz80_struc *CPU, INT32 regnum)
 	case CZ80_IM:   return zIM;
 	case CZ80_IFF1: return zIFF1;
 	case CZ80_IFF2: return zIFF2;
-	case CZ80_HALT: return CPU->HaltState;
+	case CZ80_HALT: return CPU->Status & CZ80_HALTED;
 	case CZ80_IRQ:  return CPU->IRQState;
 	default: return 0;
 	}
@@ -389,13 +378,13 @@ void Cz80_Set_Reg(cz80_struc *CPU, INT32 regnum, UINT32 val)
 		break;
 
 	case CZ80_SP:   zSP = val; break;
-	case CZ80_AF:   zAF = val; break;
+	case CZ80_FA:   zFA = val; break;
 	case CZ80_BC:   zBC = val; break;
 	case CZ80_DE:   zDE = val; break;
 	case CZ80_HL:   zHL = val; break;
 	case CZ80_IX:   zIX = val; break;
 	case CZ80_IY:   zIY = val; break;
-	case CZ80_AF2:  zAF2 = val; break;
+	case CZ80_FA2:  zFA2 = val; break;
 	case CZ80_BC2:  zBC2 = val; break;
 	case CZ80_DE2:  zDE2 = val; break;
 	case CZ80_HL2:  zHL2 = val; break;
@@ -404,7 +393,7 @@ void Cz80_Set_Reg(cz80_struc *CPU, INT32 regnum, UINT32 val)
 	case CZ80_IM:   zIM = val; break;
 	case CZ80_IFF1: zIFF1 = val ? (1 << 2) : 0; break;
 	case CZ80_IFF2: zIFF2 = val ? (1 << 2) : 0; break;
-	case CZ80_HALT: CPU->HaltState = val; break;
+	case CZ80_HALT: CPU->Status = !!val * CZ80_HALTED; break;
 	case CZ80_IRQ:  CPU->IRQState = val; break;
 	default: break;
 	}

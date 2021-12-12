@@ -60,7 +60,9 @@ endif
 use_libchdr ?= 1
 ifeq "$(ARCH)" "arm"
 use_cyclone ?= 1
+use_fame ?= 0
 use_drz80 ?= 1
+use_cz80 ?= 0
 use_sh2drc ?= 1
 use_svpdrc ?= 1
 
@@ -210,7 +212,7 @@ endif
 ifeq "$(USE_FRONTEND)" "1"
 
 # common
-OBJS += platform/common/main.o platform/common/configfile_fk.o platform/common/emu.o \
+OBJS += platform/common/main.o platform/common/configfile_fk.o platform/common/emu.o platform/common/upscale.o \
 	platform/common/menu_pico.o platform/common/config_file.o
 
 # libpicofe
