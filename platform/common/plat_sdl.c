@@ -262,38 +262,35 @@ void flip_NN_AllowOutOfScreen(SDL_Surface *virtual_screen, SDL_Surface *hardware
 }
 
 /// Nearest neighboor optimized with possible out of screen coordinates (for cropping)
-void flip_NNOptimized_AllowOutOfScreen(SDL_Surface *virtual_screen, SDL_Surface *hardware_screen, int new_w, int new_h){
-  int w1=virtual_screen->w;
-  //int h1=virtual_screen->h;
-  int w2=new_w;
-  int h2=new_h;
-  int x_ratio = (int)((virtual_screen->w<<16)/w2);
-  int y_ratio = (int)((virtual_screen->h<<16)/h2);
-
-  int y_padding = (RES_HW_SCREEN_VERTICAL-new_h)/2;
-  //int x_ratio = (int)((virtual_screen->w<<16)/w2);
-  //int y_ratio = (int)((virtual_screen->h<<16)/h2);
-  int x2, y2 ;
+void flip_NNOptimized_AllowOutOfScreen(SDL_Surface *src_surface, SDL_Surface *dst_surface, int new_w, int new_h){
+  int x_ratio = (int)((src_surface->w<<16)/new_w);
+  int y_ratio = (int)((src_surface->h<<16)/new_h);
+  int x2, y2;
+  /*printf("src_surface dimensions: %dx%d, new dimensions: %dx%d\n", 
+          src_surface->w, src_surface->h, new_w, new_h);*/
 
   /// --- Compute padding for centering when out of bounds ---
-  int x_padding = 0;
-  if(w2>RES_HW_SCREEN_HORIZONTAL){
-    x_padding = (w2-RES_HW_SCREEN_HORIZONTAL)/2 + 1;
-  }
-  int x_padding_ratio = x_padding*w1/w2;
-  //printf("virtual_screen->h=%d, h2=%d\n", virtual_screen->h, h2);
+  int y_padding_dst = MAX((RES_HW_SCREEN_VERTICAL-new_h)/2, 0);
+  int x_padding_dst = MAX((RES_HW_SCREEN_HORIZONTAL-new_w)/2, 0);
+  /*printf("padding_dst_x: %d, padding_dst_y: %d\n", x_padding_dst, y_padding_dst);*/
 
-  for (int i=0;i<h2;i++)
+  /// --- Compute offset coordinates in src surface
+  int x_offset_src = (new_w>RES_HW_SCREEN_HORIZONTAL) ? (new_w-RES_HW_SCREEN_HORIZONTAL)/2 + 1 : 0;
+  int x_offset_src_ratio = x_offset_src*src_surface->w/new_w;
+  /*printf("x_offset_src: %d,\n", x_offset_src);*/
+
+  for (int i=0;i<new_h;i++)
   {
     if(i>=RES_HW_SCREEN_VERTICAL){
       continue;
     }
 
-    uint16_t* t = (uint16_t*)(hardware_screen->pixels+((i+y_padding)* ((w2>RES_HW_SCREEN_HORIZONTAL)?RES_HW_SCREEN_HORIZONTAL:w2) )*sizeof(uint16_t));
+    uint16_t* t = (uint16_t*)(dst_surface->pixels + 
+                              ( (i+y_padding_dst)* dst_surface->w + x_padding_dst )*sizeof(uint16_t));
     y2 = ((i*y_ratio)>>16);
-    uint16_t* p = (uint16_t*)(virtual_screen->pixels + (y2*w1 + x_padding_ratio) *sizeof(uint16_t));
+    uint16_t* p = (uint16_t*)(src_surface->pixels + (y2*src_surface->w + x_offset_src_ratio) *sizeof(uint16_t));
     int rat = 0;
-    for (int j=0;j<w2;j++)
+    for (int j=0;j<new_w;j++)
     {
       if(j>=RES_HW_SCREEN_HORIZONTAL){
         continue;
@@ -301,7 +298,7 @@ void flip_NNOptimized_AllowOutOfScreen(SDL_Surface *virtual_screen, SDL_Surface 
       x2 = (rat>>16);
       *t++ = p[x2];
       rat += x_ratio;
-      //printf("y=%d, x=%d, y2=%d, x2=%d, (y2*virtual_screen->w)+x2=%d\n", i, j, y2, x2, (y2*virtual_screen->w)+x2);
+      //printf("y=%d, x=%d, y2=%d, x2=%d, (y2*src_surface->w)+x2=%d\n", i, j, y2, x2, (y2*src_surface->w)+x2);
     }
   }
 }
@@ -1687,10 +1684,16 @@ void scale_for_gg(SDL_Surface *src_surface,
     break;
 
   case ASPECT_RATIOS_TYPE_MANUAL:
-    ;uint32_t h_scaled = src_surface->h*RES_HW_SCREEN_HORIZONTAL/src_surface->w;
+    /*;uint32_t h_scaled = src_surface->h*RES_HW_SCREEN_HORIZONTAL/src_surface->w;
     ;uint32_t h_zoomed = h_scaled + aspect_ratio_factor_percent*(RES_HW_SCREEN_VERTICAL - h_scaled)/100;
     flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
                     MAX(src_surface->w*h_zoomed/src_surface->h, RES_HW_SCREEN_HORIZONTAL),
+                    MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));*/
+
+    ;uint32_t h_min = src_surface->h;
+    ;uint32_t h_zoomed = h_min + aspect_ratio_factor_percent*(RES_HW_SCREEN_VERTICAL - h_min)/100;
+    flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
+                    src_surface->w*h_zoomed/src_surface->h,
                     MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));
     break;
 
@@ -1732,6 +1735,12 @@ void scale_for_SMS(SDL_Surface *src_surface,
     flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
                     MAX(src_surface->w*h_zoomed/src_surface->h, RES_HW_SCREEN_HORIZONTAL),
                     MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));
+
+    /*;uint32_t h_min = src_surface->h;
+    ;uint32_t h_zoomed = h_min + aspect_ratio_factor_percent*(RES_HW_SCREEN_VERTICAL - h_min)/100;
+    flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
+                    src_surface->w*h_zoomed/src_surface->h,
+                    MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));*/
     break;
 
   case ASPECT_RATIOS_TYPE_CROPPED:
