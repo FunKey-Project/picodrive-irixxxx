@@ -1735,18 +1735,12 @@ void scale_for_SMS(SDL_Surface *src_surface,
     flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
                     MAX(src_surface->w*h_zoomed/src_surface->h, RES_HW_SCREEN_HORIZONTAL),
                     MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));
-
-    /*;uint32_t h_min = src_surface->h;
-    ;uint32_t h_zoomed = h_min + aspect_ratio_factor_percent*(RES_HW_SCREEN_VERTICAL - h_min)/100;
-    flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
-                    src_surface->w*h_zoomed/src_surface->h,
-                    MIN(h_zoomed, RES_HW_SCREEN_VERTICAL));*/
     break;
 
   case ASPECT_RATIOS_TYPE_CROPPED:
       flip_NNOptimized_AllowOutOfScreen(src_surface, dst_surface,
-              src_surface->w*RES_HW_SCREEN_VERTICAL/src_surface->h,
-              RES_HW_SCREEN_VERTICAL);
+              src_surface->w,
+              src_surface->h);
     break;
 
   case ASPECT_RATIOS_TYPE_SCALED:
