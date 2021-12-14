@@ -1886,7 +1886,7 @@ void plat_video_flip(void)
 
 			/* Copy Game Gear game pixels */
 			int offset_y = (plat_sdl_screen->h - gg_game_screen->h)/2;
-			int offset_x = (plat_sdl_screen->w - gg_game_screen->w)/2 - 1;
+			int offset_x = (plat_sdl_screen->w - gg_game_screen->w)/2;
 			int y;
 			for(y=0; y<gg_game_screen->h; y++){
 				memcpy((uint16_t*)gg_game_screen->pixels + gg_game_screen->w*y,
