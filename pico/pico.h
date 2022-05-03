@@ -23,7 +23,7 @@ extern void lprintf(const char *fmt, ...);
 // external funcs for Sega/Mega CD
 extern int  mp3_get_bitrate(void *f, int size);
 extern void mp3_start_play(void *f, int pos);
-extern void mp3_update(int *buffer, int length, int stereo);
+extern void mp3_update(s32 *buffer, int length, int stereo);
 
 // this function should write-back d-cache and invalidate i-cache
 // on a mem region [start_addr, end_addr)
@@ -76,16 +76,18 @@ extern void *p32x_bios_g, *p32x_bios_m, *p32x_bios_s;
 #define POPT_PWM_IRQ_OPT    (1<<22)
 #define POPT_DIS_FM_SSGEG   (1<<23)
 #define POPT_EN_FM_DAC      (1<<24) //x00 0000
+#define POPT_EN_FM_FILTER   (1<<25)
 
-#define PAHW_MCD  (1<<0)
-#define PAHW_32X  (1<<1)
-#define PAHW_SVP  (1<<2)
-#define PAHW_PICO (1<<3)
-#define PAHW_SMS  (1<<4)
+#define PAHW_MCD    (1<<0)
+#define PAHW_32X    (1<<1)
+#define PAHW_SVP    (1<<2)
+#define PAHW_PICO   (1<<3)
+#define PAHW_SMS    (1<<4)
 
-#define PHWS_AUTO 0
-#define PHWS_GG   1
-#define PHWS_SMS  2
+#define PHWS_AUTO   0
+#define PHWS_GG     1
+#define PHWS_SMS    2
+#define PHWS_SG     3
 
 #define PQUIRK_FORCE_6BTN   (1<<0)
 
@@ -95,8 +97,8 @@ typedef struct PicoInterface
 {
 	unsigned int opt; // POPT_* bitfield
 
-	unsigned short pad[2];     // Joypads, format is MXYZ SACB RLDU
-	unsigned short padInt[2];  // internal copy
+	unsigned short pad[4];     // Joypads, format is MXYZ SACB RLDU
+	unsigned short padInt[4];  // internal copy
 	unsigned short AHW;        // active addon hardware: PAHW_* bitfield
 
 	unsigned short skipFrame;      // skip rendering frame, but still do sound (if enabled) and emulation stuff
@@ -186,7 +188,8 @@ size_t   pm_read(void *ptr, size_t bytes, pm_file *stream);
 size_t   pm_read_audio(void *ptr, size_t bytes, pm_file *stream);
 int      pm_seek(pm_file *stream, long offset, int whence);
 int      pm_close(pm_file *fp);
-int PicoCartLoad(pm_file *f,unsigned char **prom,unsigned int *psize,int is_sms);
+int PicoCartLoad(pm_file *f, const unsigned char *rom, unsigned int romsize,
+  unsigned char **prom, unsigned int *psize, int is_sms);
 int PicoCartInsert(unsigned char *rom, unsigned int romsize, const char *carthw_cfg);
 void PicoCartUnload(void);
 extern void (*PicoCartLoadProgressCB)(int percent);
@@ -253,7 +256,7 @@ void Pico32xSetClocks(int msh2_hz, int ssh2_hz);
 #define PICO_SSH2_HZ ((int)(7670442.0 * 2.4))
 
 // sound.c
-extern void (*PsndMix_32_to_16l)(short *dest, int *src, int count);
+extern void (*PsndMix_32_to_16l)(s16 *dest, s32 *src, int count);
 void PsndRerate(int preserve_state);
 
 // media.c
@@ -264,6 +267,7 @@ enum media_type_e {
   PM_BAD_CD_NO_BIOS = -4,
   PM_MD_CART = 1,	/* also 32x */
   PM_MARK3,
+  PM_PICO,
   PM_CD,
 };
 
@@ -296,6 +300,7 @@ typedef struct
 
 
 enum media_type_e PicoLoadMedia(const char *filename,
+  const unsigned char *rom, unsigned int romsize,
   const char *carthw_cfg_fname,
   const char *(*get_bios_filename)(int *region, const char *cd_fname),
   void (*do_region_override)(const char *media_filename));

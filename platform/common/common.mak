@@ -122,7 +122,7 @@ SRCS_COMMON += $(R)pico/carthw/svp/stub_arm.S
 SRCS_COMMON += $(R)pico/carthw/svp/compiler.c
 endif
 # sound
-SRCS_COMMON += $(R)pico/sound/sound.c
+SRCS_COMMON += $(R)pico/sound/sound.c $(R)pico/sound/resampler.c
 SRCS_COMMON += $(R)pico/sound/sn76496.c $(R)pico/sound/ym2612.c
 SRCS_COMMON += $(R)pico/sound/emu2413/emu2413.c
 ifneq "$(ARCH)$(asm_mix)" "arm1"
@@ -200,7 +200,8 @@ $(FR)cpu/cyclone/Cyclone.h:
 
 $(FR)cpu/cyclone/Cyclone.s: $(FR)cpu/$(CYCLONE_CONFIG)
 	@echo building Cyclone...
-	@make CC=$(CYCLONE_CC) CXX=$(CYCLONE_CXX) -C $(R)cpu/cyclone/ CONFIG_FILE=../$(CYCLONE_CONFIG) HAVE_ARMv6=$(HAVE_ARMv6)
+	@export CC=$(CYCLONE_CC) CXX=$(CYCLONE_CXX) CFLAGS=-O2 CXXFLAGS=-O2 CPPFLAGS="" LDFLAGS="" && \
+		make -C $(R)cpu/cyclone/ CONFIG_FILE=../$(CYCLONE_CONFIG) HAVE_ARMv6=$(HAVE_ARMv6)
 
 $(FR)cpu/cyclone/Cyclone.s: $(FR)cpu/cyclone/*.cpp $(FR)cpu/cyclone/*.h
 

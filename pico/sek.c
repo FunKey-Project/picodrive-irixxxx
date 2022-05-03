@@ -10,10 +10,6 @@
 #include "pico_int.h"
 #include "memory.h"
 
-#ifdef USE_LIBRETRO_VFS
-#include "file_stream_transforms.h"
-#endif
-
 /* context */
 // Cyclone 68000
 #ifdef EMU_C68K
@@ -192,12 +188,10 @@ PICO_INTERNAL void SekSetRealTAS(int use_real)
 // XXX: rename
 PICO_INTERNAL void SekPackCpu(unsigned char *cpu, int is_sub)
 {
-  u32 pc=0;
-
 #if defined(EMU_C68K)
   struct Cyclone *context = is_sub ? &PicoCpuCS68k : &PicoCpuCM68k;
   memcpy(cpu,context->d,0x40);
-  pc=context->pc-context->membase;
+  *(u32 *)(cpu+0x40)=context->pc-context->membase;
   *(u32 *)(cpu+0x44)=CycloneGetSr(context);
   *(u32 *)(cpu+0x48)=context->osp;
   cpu[0x4c] = context->irq;
@@ -206,7 +200,7 @@ PICO_INTERNAL void SekPackCpu(unsigned char *cpu, int is_sub)
   void *oldcontext = m68ki_cpu_p;
   m68k_set_context(is_sub ? &PicoCpuMS68k : &PicoCpuMM68k);
   memcpy(cpu,m68ki_cpu_p->dar,0x40);
-  pc=m68ki_cpu_p->pc;
+  *(u32  *)(cpu+0x40)=m68ki_cpu_p->pc;
   *(u32  *)(cpu+0x44)=m68k_get_reg(NULL, M68K_REG_SR);
   *(u32  *)(cpu+0x48)=m68ki_cpu_p->sp[m68ki_cpu_p->s_flag^SFLAG_SET];
   cpu[0x4c] = CPU_INT_LEVEL>>8;
@@ -215,16 +209,20 @@ PICO_INTERNAL void SekPackCpu(unsigned char *cpu, int is_sub)
 #elif defined(EMU_F68K)
   M68K_CONTEXT *context = is_sub ? &PicoCpuFS68k : &PicoCpuFM68k;
   memcpy(cpu,context->dreg,0x40);
-  pc=context->pc;
+  *(u32  *)(cpu+0x40)=context->pc;
   *(u32  *)(cpu+0x44)=context->sr;
   *(u32  *)(cpu+0x48)=context->asp;
   cpu[0x4c] = context->interrupts[0];
   cpu[0x4d] = (context->execinfo & FM68K_HALTED) ? 1 : 0;
 #endif
 
-  *(u32 *)(cpu+0x40) = pc;
-  *(u32 *)(cpu+0x50) =
-    is_sub ? SekCycleCntS68k : Pico.t.m68c_cnt;
+  if (is_sub) {
+    *(u32 *)(cpu+0x50) = SekCycleCntS68k;
+    *(s16 *)(cpu+0x4e) = SekCycleCntS68k - SekCycleAimS68k;
+  } else {
+    *(u32 *)(cpu+0x50) = Pico.t.m68c_cnt;
+    *(u32 *)(cpu+0x4e) = Pico.t.m68c_cnt - Pico.t.m68c_aim;
+  }
 }
 
 PICO_INTERNAL void SekUnpackCpu(const unsigned char *cpu, int is_sub)
@@ -261,10 +259,13 @@ PICO_INTERNAL void SekUnpackCpu(const unsigned char *cpu, int is_sub)
   context->execinfo &= ~FM68K_HALTED;
   if (cpu[0x4d]&1) context->execinfo |= FM68K_HALTED;
 #endif
-  if (is_sub)
+  if (is_sub) {
     SekCycleCntS68k = *(u32 *)(cpu+0x50);
-  else
+    SekCycleAimS68k = SekCycleCntS68k - *(s16 *)(cpu+0x4e);
+  } else {
     Pico.t.m68c_cnt = *(u32 *)(cpu+0x50);
+    Pico.t.m68c_aim = Pico.t.m68c_cnt - *(s16 *)(cpu+0x4e);
+  }
 }
 
 
@@ -298,14 +299,6 @@ void SekRegisterIdleHit(unsigned int pc)
 
 void SekInitIdleDet(void)
 {
-  unsigned short **tmp;
-  tmp = realloc(idledet_ptrs, 0x200 * sizeof(tmp[0]));
-  if (tmp == NULL) {
-    free(idledet_ptrs);
-    idledet_ptrs = NULL;
-  }
-  else
-    idledet_ptrs = tmp;
   idledet_count = idledet_bads = 0;
   idledet_start_frame = Pico.m.frame_count + 360;
 #ifdef IDLE_STATS
@@ -328,7 +321,7 @@ int SekIsIdleReady(void)
 int SekIsIdleCode(unsigned short *dst, int bytes)
 {
   // printf("SekIsIdleCode %04x %i\n", *dst, bytes);
-  switch (bytes)
+  if (idledet_count >= 0) switch (bytes)
   {
     case 2:
       if ((*dst & 0xf000) != 0x6000)     // not another branch
@@ -397,7 +390,10 @@ int SekRegisterIdlePatch(unsigned int pc, int oldop, int newop, void *ctx)
     (newop&0x200)?'n':'y', is_main68k?'m':'s', idledet_count);
 
   // XXX: probably shouldn't patch RAM too
-  v = m68k_read16_map[pc >> M68K_MEM_SHIFT];
+  if (is_main68k)
+    v = m68k_read16_map[pc >> M68K_MEM_SHIFT];
+  else
+    v = s68k_read16_map[pc >> M68K_MEM_SHIFT];
   if (~v & ~((uptr)-1LL >> 1)) // MSB clear?
     target = (u16 *)((v << 1) + pc);
   else {
@@ -406,7 +402,7 @@ int SekRegisterIdlePatch(unsigned int pc, int oldop, int newop, void *ctx)
     return 1; // don't patch
   }
 
-  if (idledet_count >= 0x200 && (idledet_count & 0x1ff) == 0) {
+  if (!idledet_ptrs || (idledet_count & 0x1ff) == 0) {
     unsigned short **tmp;
     tmp = realloc(idledet_ptrs, (idledet_count+0x200) * sizeof(tmp[0]));
     if (tmp == NULL)
@@ -441,7 +437,11 @@ void SekFinishIdleDet(void)
     else
       elprintf(EL_STATUS|EL_IDLE, "idle: don't know how to restore %04x", *op);
   }
+
   idledet_count = -1;
+  if (idledet_ptrs)
+    free(idledet_ptrs);
+  idledet_ptrs = NULL;
 }
 
 

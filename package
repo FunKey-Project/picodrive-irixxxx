@@ -2,22 +2,17 @@
 
 mkdir opk/
 #git pull
-make clean
 git fetch --all
-git merge upstream/FunKey
+git merge upstream/master
 ./submodule_update.sh
+./configure --platform=generic --sound-drivers=sdl
+make clean
+make
+/opt/FunKey-sdk/bin/arm-funkey-linux-musleabihf-strip PicoDrive
+cp PicoDrive opk/
 cp icons/picodrive.png opk/
 cp AUTHORS COPYING README opk/
 cp picodrive.sh opk/
-
-cd /opt/FunKey-OS
-rm -f br.log
-rm -rf FunKey/output/build/picodrive-*
-sed -i 's|PICODRIVE_OVERRIDE_SRCDIR.*|PICODRIVE_OVERRIDE_SRCDIR = /opt/picodrive-funkey|' /opt/FunKey-OS/FunKey/output/local.mk
-git pull
-make
-cp FunKey/output/target/usr/games/PicoDrive /opt/picodrive-funkey/opk
-cd -
 
 # https://unix.stackexchange.com/questions/219268/how-to-add-new-lines-when-using-echo
 print()
@@ -32,15 +27,16 @@ esac
 
 print '[Desktop Entry]
 Name=PicoDrive
-Comment=SMS/GG/MD/MCD/32X emulator
+Comment=SG/SMS/GG/MD/MCD/32X emulator
 Exec=picodrive.sh %f
 Icon=picodrive
 Categories=emulators
-SelectorFilter=zip,bin,md,smd,sms,gg,32x,cue,cso,chd' > opk/picodrive.funkey-s.desktop
+SelectorFilter=zip,bin,md,smd,sg,sms,gg,32x,cue,cso,chd' > opk/picodrive.funkey-s.desktop
 
 rm -f *.opk
-mksquashfs opk/ picodrive_v1.99_$(git rev-parse HEAD | cut -c1-7)_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
+mksquashfs opk/ picodrive_v1.3.2_$(git rev-parse HEAD | cut -c1-7)_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
 md5sum opk/PicoDrive
 rm -rf opk/
 
-sed -i 's|PICODRIVE_OVERRIDE_SRCDIR.*|PICODRIVE_OVERRIDE_SRCDIR = /opt/picodrive-irixxxx|' /opt/FunKey-OS/FunKey/output/local.mk
+make clean
+rm -f cpu/cyclone/PicoDrive.map

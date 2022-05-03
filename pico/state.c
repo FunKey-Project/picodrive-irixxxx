@@ -14,10 +14,6 @@
 #include "sound/emu2413/emu2413.h"
 #include "state.h"
 
-#ifdef USE_LIBRETRO_VFS
-#include "file_stream_transforms.h"
-#endif
-
 // sn76496 & ym2413
 extern int *sn76496_regs;
 extern OPLL old_opll;
@@ -256,6 +252,7 @@ static int state_save(void *file)
   }
   else {
     CHECKED_WRITE_BUFF(CHUNK_SMS, Pico.ms);
+    CHECKED_WRITE_BUFF(CHUNK_YM2413, old_opll);
   }
 
   CHECKED_WRITE_BUFF(CHUNK_VRAM,  PicoMem.vram);
@@ -294,8 +291,6 @@ static int state_save(void *file)
     memset(buff, 0, 0x40);
     memcpy(buff, pcd_event_times, sizeof(pcd_event_times));
     CHECKED_WRITE(CHUNK_CD_EVT, 0x40, buff);
-
-    CHECKED_WRITE(CHUNK_YM2413, sizeof(OPLL), &old_opll);
 
     len = gfx_context_save(buf2);
     CHECKED_WRITE(CHUNK_CD_GFX, len, buf2);
@@ -348,6 +343,7 @@ static int state_save(void *file)
       CHECKED_WRITE(chwc->chunk, chwc->size, chwc->ptr);
   }
 
+  CHECKED_WRITE(0, 0, NULL);
   retval = 0;
 
 out:
@@ -456,7 +452,7 @@ static int state_load(void *file)
 
       case CHUNK_IOPORTS: CHECKED_READ_BUFF(PicoMem.ioports); break;
       case CHUNK_PSG:     CHECKED_READ2(28*4, sn76496_regs); break;
-      case CHUNK_YM2413:  CHECKED_READ2(sizeof(OPLL), &old_opll); break;
+      case CHUNK_YM2413:  CHECKED_READ_BUFF(old_opll); break;
       case CHUNK_FM:
         ym2612_regs = YM2612GetRegs();
         CHECKED_READ2(0x200+4, ym2612_regs);
@@ -541,6 +537,8 @@ static int state_load(void *file)
         break;
 #endif
       default:
+        if (!len && !chunk)
+           goto readend;
         if (carthw_chunks != NULL)
         {
           carthw_state_chunk *chwc;
@@ -580,14 +578,11 @@ readend:
   z80_unpack(buff_z80);
 
   // due to dep from 68k cycles..
-  Pico.t.m68c_frame_start = Pico.t.m68c_aim = Pico.t.m68c_cnt;
+  Pico.t.m68c_frame_start = Pico.t.m68c_aim;
   if (PicoIn.AHW & PAHW_32X)
     Pico32xStateLoaded(0);
   if (PicoIn.AHW & PAHW_MCD)
-  {
-    SekCycleAimS68k = SekCycleCntS68k;
     pcd_state_loaded();
-  }
 
   Pico.m.dirtyPal = 1;
   Pico.video.status &= ~(SR_VB | SR_F);
@@ -607,7 +602,7 @@ static int state_load_gfx(void *file)
   char buff[8];
 
   if (PicoIn.AHW & PAHW_32X)
-    to_find += 2;
+    to_find += 3;
 
   g_read_offs = 0;
   CHECKED_READ(8, buff);
@@ -634,16 +629,19 @@ static int state_load_gfx(void *file)
       case CHUNK_DRAM:
         if (Pico32xMem != NULL)
           CHECKED_READ_BUFF(Pico32xMem->dram);
+        found++;
         break;
 
       case CHUNK_32XPAL:
         if (Pico32xMem != NULL)
           CHECKED_READ_BUFF(Pico32xMem->pal);
+        found++;
         Pico32x.dirty_pal = 1;
         break;
 
       case CHUNK_32XSYS:
         CHECKED_READ_BUFF(Pico32x);
+        found++;
         break;
 #endif
       default:
@@ -717,7 +715,8 @@ int PicoStateLoadGfx(const char *fname)
   }
   areaClose(afile);
 
-  PicoVideoCacheSAT();
+  PicoVideoCacheSAT(1);
+  Pico.est.rendstatus = -1;
   return 0;
 }
 
@@ -776,6 +775,7 @@ void PicoTmpStateRestore(void *data)
   memcpy(VdpSATCache, t->satcache, sizeof(VdpSATCache));
   memcpy(&Pico.video, &t->video, sizeof(Pico.video));
   Pico.m.dirtyPal = 1;
+  PicoVideoCacheSAT(0);
 
 #ifndef NO_32X
   if (PicoIn.AHW & PAHW_32X) {

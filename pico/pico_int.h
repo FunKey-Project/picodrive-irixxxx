@@ -313,8 +313,8 @@ struct PicoVideo
   unsigned char hint_cnt;
   unsigned char pad2;
   unsigned short hv_latch;    // latched hvcounter value
-  signed int fifo_cnt;        // pending xfers for current FIFO queue entry
-  unsigned char pad[0x04];
+  signed int fifo_cnt;        // pending xfers for blocking FIFO queue entries
+  signed int fifo_bgcnt;      // pending xfers for background FIFO queue entries
 };
 
 struct PicoMisc
@@ -342,6 +342,11 @@ struct PicoMisc
   unsigned int  frame_count;   // 1c for movies and idle det
 };
 
+#define PMS_HW_GG	0x1   // Game Gear
+#define PMS_HW_LCD	0x2   // GG LCD
+#define PMS_HW_JAP	0x4   // japanese system
+#define PMS_HW_SG	0x8   // SG-1000
+
 #define PMS_MAP_AUTO	0
 #define PMS_MAP_SEGA	1
 #define PMS_MAP_CODEM	2
@@ -351,6 +356,7 @@ struct PicoMisc
 #define PMS_MAP_N16K	6
 #define PMS_MAP_JANGGUN	7
 #define PMS_MAP_NEMESIS	8
+#define PMS_MAP_8KBRAM	9
 
 struct PicoMS
 {
@@ -362,7 +368,8 @@ struct PicoMS
   unsigned char vdp_buffer;
   unsigned char vdp_hlatch;
   unsigned char io_gg[0x08];
-  unsigned char pad[0x42];
+  unsigned char mapcnt;
+  unsigned char pad[0x41];
 };
 
 // emu state and data for the asm code
@@ -452,11 +459,13 @@ struct PicoSound
   int len_e_cnt;
   unsigned int clkl_mult;               // z80 clocks per line in Q20
   unsigned int smpl_mult;               // samples per line in Q16
+  unsigned int cdda_mult, cdda_div;     // 44.1 KHz resampling factor in Q16
   short dac_val, dac_val2;              // last DAC sample
   unsigned int dac_pos;                 // last DAC position in Q20
   unsigned int fm_pos;                  // last FM position in Q20
   unsigned int psg_pos;                 // last PSG position in Q16
   unsigned int ym2413_pos;              // last YM2413 position
+  unsigned int fm_fir_mul, fm_fir_div;  // ratio for FM resampling FIR
 };
 
 // run tools/mkoffsets pico/pico_int_offs.h if you change these
@@ -845,6 +854,8 @@ extern short cdda_out_buffer[2*1152];
 
 void cdda_start_play(int lba_base, int lba_offset, int lb_len);
 
+#define YM2612_NATIVE_RATE() (((Pico.m.pal?OSC_PAL:OSC_NTSC)/7 + 3*24) / (6*24))
+
 void ym2612_sync_timers(int z80_cycles, int mode_old, int mode_new);
 void ym2612_pack_state(void);
 void ym2612_unpack_state(void);
@@ -904,7 +915,7 @@ int PicoVideoFIFOWrite(int count, int byte_p, unsigned sr_mask, unsigned sr_flag
 void PicoVideoInit(void);
 void PicoVideoSave(void);
 void PicoVideoLoad(void);
-void PicoVideoCacheSAT(void);
+void PicoVideoCacheSAT(int load);
 
 // misc.c
 PICO_INTERNAL_ASM void memcpy16bswap(unsigned short *dest, void *src, int count);
@@ -1025,7 +1036,7 @@ extern int Pico32xDrawMode;
 // 32x/pwm.c
 unsigned int p32x_pwm_read16(u32 a, SH2 *sh2, unsigned int m68k_cycles);
 void p32x_pwm_write16(u32 a, unsigned int d, SH2 *sh2, unsigned int m68k_cycles);
-void p32x_pwm_update(int *buf32, int length, int stereo);
+void p32x_pwm_update(s32 *buf32, int length, int stereo);
 void p32x_pwm_ctl_changed(void);
 void p32x_pwm_schedule(unsigned int m68k_now);
 void p32x_pwm_schedule_sh2(SH2 *sh2);

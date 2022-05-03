@@ -1,6 +1,6 @@
 [submodule "platform/libpicofe"]
 	path = platform/libpicofe
-	url = https://github.com/DrUm78/picofe-irixxxx
+	url = https://github.com/DrUm78/libpicofe.git
 [submodule "cpu/cyclone"]
 	path = cpu/cyclone
 	url = https://github.com/irixxxx/cyclone68000.git
@@ -10,9 +10,6 @@
 [submodule "pico/cd/libchdr"]
 	path = pico/cd/libchdr
 	url = https://github.com/rtissera/libchdr.git
-[submodule "platform/common/minimp3"]
-	path = platform/common/minimp3
-	url = https://github.com/lieff/minimp3
 [submodule "platform/common/dr_libs"]
 	path = platform/common/dr_libs
-	url = https://github.com/mackron/dr_libs
+	url = https://github.com/mackron/dr_libs.git
