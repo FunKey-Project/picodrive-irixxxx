@@ -3,7 +3,8 @@
 mkdir opk/
 #git pull
 git fetch --all
-git merge upstream/master
+git merge upstream/FunKey
+git merge upstream2/master
 ./submodule_update.sh
 ./configure --platform=generic --sound-drivers=sdl
 make clean
