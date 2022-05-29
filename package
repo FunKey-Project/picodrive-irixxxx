@@ -5,7 +5,7 @@ mkdir opk/
 git fetch --all
 git merge upstream/FunKey
 git merge upstream2/master
-./submodule_update.sh
+#git submodule update --remote --recursive
 ./configure --platform=generic --sound-drivers=sdl
 make clean
 make
@@ -35,7 +35,7 @@ Categories=emulators
 SelectorFilter=zip,bin,md,smd,sg,sms,gg,32x,cue,cso,chd' > opk/picodrive.funkey-s.desktop
 
 rm -f *.opk
-mksquashfs opk/ picodrive_v1.3.2_$(git rev-parse HEAD | cut -c1-7)_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
+mksquashfs opk/ picodrive_v1.4_funkey-s.opk -all-root -noappend -no-exports -no-xattrs
 md5sum opk/PicoDrive
 rm -rf opk/
 
