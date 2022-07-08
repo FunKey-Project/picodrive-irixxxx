@@ -5,7 +5,7 @@ mkdir opk/
 git fetch --all
 git merge upstream/FunKey
 git merge upstream2/master
-./submodule_update.sh
+git submodule update --remote --recursive
 ./configure --platform=generic --sound-drivers=sdl
 make clean
 make
