@@ -18,17 +18,13 @@
 #include "../libpicofe/lprintf.h"
 #include "config_file.h"
 
-#ifdef USE_LIBRETRO_VFS
-#include "file_stream_transforms.h"
-#endif
-
 static char *mystrip(char *str);
 
 #ifndef _MSC_VER
 
 #include "menu_pico.h"
 #include "emu.h"
-#include <pico/pico.h>
+#include <pico/pico_int.h>
 
 // always output DOS endlines
 #ifdef _WIN32
@@ -82,6 +78,19 @@ static void keys_write(FILE *fn, int dev_id, const int *binds)
 			if (mask & binds[IN_BIND_OFFS(k, IN_BINDTYPE_PLAYER12)]) {
 				strncpy(act, me_ctrl_actions[i].name, 31);
 				fprintf(fn, "bind %s = player2 %s" NL, name, mystrip(act));
+			}
+		}
+
+		for (i = 0; me_ctrl_actions[i].name != NULL; i++) {
+			mask = me_ctrl_actions[i].mask;
+			if (mask & binds[IN_BIND_OFFS(k, IN_BINDTYPE_PLAYER34)]) {
+				strncpy(act, me_ctrl_actions[i].name, 31);
+				fprintf(fn, "bind %s = player3 %s" NL, name, mystrip(act));
+			}
+			mask = me_ctrl_actions[i].mask << 16;
+			if (mask & binds[IN_BIND_OFFS(k, IN_BINDTYPE_PLAYER34)]) {
+				strncpy(act, me_ctrl_actions[i].name, 31);
+				fprintf(fn, "bind %s = player4 %s" NL, name, mystrip(act));
 			}
 		}
 
@@ -266,8 +275,13 @@ static int custom_read(menu_entry *me, const char *var, const char *val)
 		case MA_OPT_SOUND_QUALITY:
 			if (strcasecmp(var, "Sound Quality") != 0) return 0;
 			PicoIn.sndRate = strtoul(val, &tmp, 10);
-			if (PicoIn.sndRate < 8000 || PicoIn.sndRate > 44100)
-				PicoIn.sndRate = 22050;
+			if (PicoIn.sndRate < 8000 || PicoIn.sndRate > 54000) {
+				if  (strncasecmp(tmp, "native", 6) == 0) {
+					tmp += 6;
+					PicoIn.sndRate = 53000;
+				} else
+					PicoIn.sndRate = 22050;
+			}
 			if (*tmp == 'H' || *tmp == 'h') tmp++;
 			if (*tmp == 'Z' || *tmp == 'z') tmp++;
 			while (*tmp == ' ') tmp++;
@@ -371,12 +385,12 @@ static int parse_bind_val(const char *val, int *type)
 		int player, shift = 0;
 		player = atoi(val + 6) - 1;
 
-		if (player > 1)
+		if (player > 3)
 			return -1;
-		if (player == 1)
+		if (player & 1)
 			shift = 16;
 
-		*type = IN_BINDTYPE_PLAYER12;
+		*type = IN_BINDTYPE_PLAYER12 + (player >> 1);
 		for (i = 0; me_ctrl_actions[i].name != NULL; i++) {
 			if (strncasecmp(me_ctrl_actions[i].name, val + 8, strlen(val + 8)) == 0)
 				return me_ctrl_actions[i].mask << shift;

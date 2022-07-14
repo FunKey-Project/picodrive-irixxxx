@@ -74,7 +74,7 @@ static void do_hint(struct PicoVideo *pv)
 
 static void do_timing_hacks_end(struct PicoVideo *pv)
 {
-  PicoVideoFIFOSync(488);
+  PicoVideoFIFOSync(CYCLES_M68K_LINE);
 }
 
 static void do_timing_hacks_start(struct PicoVideo *pv)
@@ -311,8 +311,7 @@ static int PicoFrameHints(void)
 #endif
 
   // get samples from sound chips
-  if (PicoIn.sndOut)
-    PsndGetSamples(y);
+  PsndGetSamples(y);
 
   timers_cycle();
 

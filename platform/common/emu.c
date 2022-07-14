@@ -29,10 +29,6 @@
 #include <pico/pico_int.h>
 #include <pico/patch.h>
 
-#ifdef USE_LIBRETRO_VFS
-#include "file_stream_transforms.h"
-#endif
-
 #if defined(__GNUC__) && __GNUC__ >= 7
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 #endif
@@ -64,7 +60,7 @@ int engineState = PGS_Menu;
 int show_fps_bypass = 0;
 int need_screen_cleared = 0;
 
-static short __attribute__((aligned(4))) sndBuffer[2*44100/50];
+static short __attribute__((aligned(4))) sndBuffer[2*54000/50];
 
 /* tmp buff to reduce stack usage for plats with small stack */
 static char static_buff[1024];
@@ -426,9 +422,11 @@ static void system_announce(void)
 
 	if (PicoIn.AHW & PAHW_SMS) {
 		sys_name = "Master System";
-		if (Pico.m.hardware & 0x1)
+		if (Pico.m.hardware & PMS_HW_GG)
 			sys_name = "Game Gear";
-		else if (Pico.m.hardware & 0x4)
+		else if (Pico.m.hardware & PMS_HW_SG)
+			sys_name = "SG-1000";
+		else if (Pico.m.hardware & PMS_HW_JAP)
 			sys_name = "Mark III";
 #ifdef NO_SMS
 		extra = " [no support]";
@@ -545,7 +543,7 @@ int emu_reload_rom(const char *rom_fname_in)
 
 	emu_make_path(carthw_path, "carthw.cfg", sizeof(carthw_path));
 
-	media_type = PicoLoadMedia(rom_fname, carthw_path,
+	media_type = PicoLoadMedia(rom_fname, NULL, 0, carthw_path,
 			find_bios, do_region_override);
 
 	switch (media_type) {
@@ -705,7 +703,7 @@ void emu_prep_defconfig(void)
 	memset(&defaultConfig, 0, sizeof(defaultConfig));
 	defaultConfig.EmuOpt    = EOPT_EN_SRAM | EOPT_EN_SOUND | EOPT_16BPP |
 				  EOPT_EN_CD_LEDS | EOPT_GZIP_SAVES | 0x10/*?*/;
-	defaultConfig.s_PicoOpt = POPT_EN_YM2413|POPT_EN_GG_LCD |
+	defaultConfig.s_PicoOpt = POPT_EN_FM_FILTER|POPT_EN_GG_LCD |
 				  POPT_EN_STEREO|POPT_EN_FM|POPT_EN_PSG|POPT_EN_Z80 |
 				  POPT_EN_MCD_PCM|POPT_EN_MCD_CDDA|POPT_EN_MCD_GFX |
 				  POPT_EN_DRC|POPT_ACC_SPRITES |
@@ -721,7 +719,6 @@ void emu_prep_defconfig(void)
 	defaultConfig.input_dev0 = PICO_INPUT_PAD_3BTN;
 	defaultConfig.input_dev1 = PICO_INPUT_PAD_3BTN;
 	defaultConfig.volume = 50;
-	//defaultConfig.volume = 99;
 	defaultConfig.gamma = 100;
 	defaultConfig.scaling = 0;
 	defaultConfig.turbo_rate = 15;
@@ -1105,7 +1102,7 @@ void emu_set_fastforward(int set_on)
 		set_EmuOpt = currentConfig.EmuOpt;
 		PicoIn.sndOut = NULL;
 		currentConfig.Frameskip = 8;
-		currentConfig.EmuOpt &= ~4;
+		currentConfig.EmuOpt &= ~EOPT_EN_SOUND;
 		currentConfig.EmuOpt |= EOPT_NO_FRMLIMIT;
 		is_on = 1;
 		emu_status_msg("FAST FORWARD");
@@ -1116,9 +1113,6 @@ void emu_set_fastforward(int set_on)
 		currentConfig.EmuOpt = set_EmuOpt;
 		PsndRerate(1);
 		is_on = 0;
-		// mainly to unbreak pcm
-		if (PicoIn.AHW & PAHW_MCD)
-			pcd_state_loaded();
 	}
 }
 
@@ -1463,21 +1457,29 @@ void emu_update_input(void)
 {
 	static int prev_events = 0;
 	int actions[IN_BINDTYPE_COUNT] = { 0, };
-	int pl_actions[2];
+	int pl_actions[4];
 	int events;
 
 	in_update(actions);
 
 	pl_actions[0] = actions[IN_BINDTYPE_PLAYER12];
 	pl_actions[1] = actions[IN_BINDTYPE_PLAYER12] >> 16;
+	pl_actions[2] = actions[IN_BINDTYPE_PLAYER34];
+	pl_actions[3] = actions[IN_BINDTYPE_PLAYER34] >> 16;
 
 	PicoIn.pad[0] = pl_actions[0] & 0xfff;
 	PicoIn.pad[1] = pl_actions[1] & 0xfff;
+	PicoIn.pad[2] = pl_actions[2] & 0xfff;
+	PicoIn.pad[3] = pl_actions[3] & 0xfff;
 
 	if (pl_actions[0] & 0x7000)
 		do_turbo(&PicoIn.pad[0], pl_actions[0]);
 	if (pl_actions[1] & 0x7000)
 		do_turbo(&PicoIn.pad[1], pl_actions[1]);
+	if (pl_actions[2] & 0x7000)
+		do_turbo(&PicoIn.pad[2], pl_actions[2]);
+	if (pl_actions[3] & 0x7000)
+		do_turbo(&PicoIn.pad[3], pl_actions[3]);
 
 	events = actions[IN_BINDTYPE_EMU] & PEV_MASK;
 
@@ -1649,6 +1651,9 @@ void emu_sound_start(void)
 {
 	PicoIn.sndOut = NULL;
 
+	// auto-select rate?
+	if (PicoIn.sndRate > 52000 && PicoIn.sndRate < 54000)
+		PicoIn.sndRate = YM2612_NATIVE_RATE();
 	if (currentConfig.EmuOpt & EOPT_EN_SOUND)
 	{
 		int is_stereo = (PicoIn.opt & POPT_EN_STEREO) ? 1 : 0;

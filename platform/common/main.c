@@ -24,10 +24,6 @@
 #include "version.h"
 #include <cpu/debug.h>
 
-#ifdef USE_LIBRETRO_VFS
-#include "file_stream_transforms.h"
-#endif
-
 char **g_argv;
 char *prog_name;
 char *load_state_file = NULL;
@@ -202,6 +198,7 @@ int main(int argc, char *argv[])
 
 	if (engineState == PGS_ReloadRom)
 	{
+		plat_video_menu_begin();
 		if (emu_reload_rom(rom_fname_reload)) {
 			engineState = PGS_Running;
 
@@ -255,7 +252,9 @@ int main(int argc, char *argv[])
 				}
 			}
 		}
+		plat_video_menu_end();
 	}
+	plat_video_menu_leave();
 
 	for (;;)
 	{
