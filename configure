@@ -50,6 +50,7 @@ have_arm_oabi=""
 have_arm_neon="yes"
 have_libavcodec=""
 have_libchdr=""
+have_gles="no"
 need_sdl="yes"
 need_xlib="no"
 need_zlib="no"
@@ -86,11 +87,12 @@ set_platform()
   platform=$1
   case "$platform" in
   rpi1)
-    optimize_arm1176jzf="yes"
+    MFLAGS="mcpu=arm1176jzf-s -mfpu=vfp"
+    have_gles="yes"
     ;;
   rpi2)
-    optimize_cortexa7="yes"
-    have_arm_neon="yes"
+    MFLAGS="mcpu=cortex-a7 -mfpu=neon"
+    have_gles="yes"
     ;;
   generic)
     CFLAGS="-D__FUNKEY__ -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -fno-PIC -march=armv7-a+neon-vfpv4 -mtune=cortex-a7 -mfpu=neon-vfpv4 -mvectorize-with-neon-quad -D__ARM_NEON__ -mfloat-abi=hard -ffast-math -funsafe-math-optimizations -I/opt/FunKey-sdk/arm-funkey-linux-musleabihf/sysroot/usr/bin/../../usr/include/SDL -D_GNU_SOURCE=1 -D_REENTRANT -Wno-unused-result"
@@ -166,6 +168,8 @@ for opt do
   ;;
   --with-libavcodec=*) have_libavcodec="$optarg"
   ;;
+  --with-sdl-gles=*) have_gles="$optarg"
+  ;;
   *) echo "ERROR: unknown option $opt"; show_help="yes"
   ;;
   esac
@@ -179,6 +183,7 @@ if [ "$show_help" = "yes" ]; then
   echo "  --sound-drivers=LIST     sound output drivers [guessed]"
   echo "                           available: $sound_driver_list"
   echo "  --with-libavcodec=yes|no use libavcodec for mp3 decoding"
+  echo "  --with-sdl-gles=yes|no   enable GLES usage for SDL"
   echo "influential environment variables:"
   echo "  CROSS_COMPILE CC CXX AS STRIP CFLAGS ASFLAGS LDFLAGS LDLIBS"
   exit 1
@@ -489,6 +494,9 @@ echo >> $config_mak
 echo "ARCH = $ARCH" >> $config_mak
 echo "PLATFORM = $platform" >> $config_mak
 echo "SOUND_DRIVERS = $sound_drivers" >> $config_mak
+if [ "$have_gles" = "yes" ]; then
+  echo "HAVE_GLES = 1" >> $config_mak
+fi
 if [ "$have_libavcodec" = "yes" ]; then
   echo "HAVE_LIBAVCODEC = 1" >> $config_mak
 fi

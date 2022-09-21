@@ -48,7 +48,7 @@ static const char *rom_exts[] = {
 	"pco", "smd", "gen", "md",
 	"iso", "cso", "cue", "chd",
 	"32x",
-	"sms", "gg",  "sg",
+	"sms", "gg",  "sg", "sc",
 	NULL
 };
 
@@ -75,6 +75,7 @@ static unsigned short fname2color(const char *fname)
 #include <platform/libpicofe/menu.c>
 
 static const char *men_dummy[] = { NULL };
+static int menu_w, menu_h;
 
 /* platform specific options and handlers */
 #if   defined(__GP2X__)
@@ -1429,7 +1430,17 @@ static void copy_bg(int dir)
 
 static void menu_enter(int is_rom_loaded)
 {
-	if (is_rom_loaded)
+	plat_video_menu_enter(is_rom_loaded);
+	menu_w = menu_h = 0;
+}
+
+static void menu_draw_prep(void)
+{
+	if (menu_w == g_menuscreen_w && menu_h == g_menuscreen_h)
+		return;
+	menu_w = g_menuscreen_w, menu_h = g_menuscreen_h;
+
+	if (PicoGameLoaded)
 	{
 		make_bg(0, 0);
 	}
@@ -1441,12 +1452,11 @@ static void menu_enter(int is_rom_loaded)
 		strcpy(buff + pos, "background.png");
 
 		// should really only happen once, on startup..
+		memset(g_menubg_ptr, 0, g_menuscreen_w * g_menuscreen_h * 2);
 		if (readpng(g_menubg_ptr, buff, READPNG_BG,
 						g_menuscreen_w, g_menuscreen_h) < 0)
 			memset(g_menubg_ptr, 0, g_menuscreen_w * g_menuscreen_h * 2);
 	}
-
-	plat_video_menu_enter(is_rom_loaded);
 }
 
 static void draw_savestate_bg(int slot)
@@ -1726,7 +1736,7 @@ static int menu_loop_keyconfig(int id, int keys)
 	static int sel = 0;
 
 	me_enable(e_menu_keyconfig, MA_OPT_SAVECFG_GAME, PicoGameLoaded);
-	me_loop(e_menu_keyconfig, &sel);
+	me_loop_d(e_menu_keyconfig, &sel, menu_draw_prep, NULL);
 
 	PicoSetInputDevice(0, currentConfig.input_dev0);
 	PicoSetInputDevice(1, currentConfig.input_dev1);
@@ -1751,7 +1761,7 @@ static int menu_loop_md_options(int id, int keys)
 	static int sel = 0;
 
 	me_enable(e_menu_md_options, MA_OPT_RENDERER, renderer_names[0] != NULL);
-	me_loop(e_menu_md_options, &sel);
+	me_loop_d(e_menu_md_options, &sel, menu_draw_prep, NULL);
 
 	return 0;
 }
@@ -1779,7 +1789,7 @@ static menu_entry e_menu_cd_options[] =
 static int menu_loop_cd_options(int id, int keys)
 {
 	static int sel = 0;
-	me_loop(e_menu_cd_options, &sel);
+	me_loop_d(e_menu_cd_options, &sel, menu_draw_prep, NULL);
 	return 0;
 }
 
@@ -1838,7 +1848,7 @@ static int menu_loop_32x_options(int id, int keys)
 	static int sel = 0;
 
 	me_enable(e_menu_32x_options, MA_32XOPT_RENDERER, renderer_names32x[0] != NULL);
-	me_loop(e_menu_32x_options, &sel);
+	me_loop_d(e_menu_32x_options, &sel, menu_draw_prep, NULL);
 
 	Pico32xSetClocks(currentConfig.msh2_khz * 1000, currentConfig.msh2_khz * 1000);
 
@@ -1852,14 +1862,15 @@ static int menu_loop_32x_options(int id, int keys)
 #ifndef NO_SMS
 
 static const char *sms_hardwares[] = { "auto", "Game Gear", "Master System", "SG-1000", NULL };
-static const char *sms_mappers[] = { "auto", "Sega", "Codemasters", "Korea", "Korea MSX", "Korea X-in-1", "Korea 4-Pak", "Korea Janggun", "Korea Nemesis", "Taiwan 8K RAM", NULL };
+static const char *gg_ghosting_opts[] = { "OFF", "weak", "normal", NULL };
+static const char *sms_mappers[] = { "auto", "Sega", "Codemasters", "Korea", "Korea MSX", "Korea X-in-1", "Korea 4-Pak", "Korea Janggun", "Korea Nemesis", "Taiwan 8K RAM", "Korea XOR", NULL };
 static const char h_smsfm[] = "FM sound is only supported by few games\nOther games may crash with FM enabled";
 static const char h_ghost[] = "simulates the inertia of the GG LCD display";
 
 static menu_entry e_menu_sms_options[] =
 {
 	mee_enum      ("System",            MA_SMSOPT_HARDWARE, PicoIn.hwSelect, sms_hardwares),
-	mee_enum_h    ("Game Gear LCD ghosting", MA_SMSOPT_GHOSTING, currentConfig.ghosting, men_ghosting_opts, h_ghost),
+	mee_enum_h    ("Game Gear LCD ghosting", MA_SMSOPT_GHOSTING, currentConfig.ghosting, gg_ghosting_opts, h_ghost),
 	mee_onoff_h   ("FM Sound Unit",     MA_OPT2_ENABLE_YM2413, PicoIn.opt, POPT_EN_YM2413, h_smsfm),
 	mee_enum      ("Cartridge mapping", MA_SMSOPT_MAPPER, PicoIn.mapper, sms_mappers),
 	mee_end,
@@ -1869,7 +1880,7 @@ static int menu_loop_sms_options(int id, int keys)
 {
 	static int sel = 0;
 
-	me_loop(e_menu_sms_options, &sel);
+	me_loop_d(e_menu_sms_options, &sel, menu_draw_prep, NULL);
 
 	return 0;
 }
@@ -1901,7 +1912,7 @@ static int menu_loop_adv_options(int id, int keys)
 {
 	static int sel = 0;
 
-	me_loop(e_menu_adv_options, &sel);
+	me_loop_d(e_menu_adv_options, &sel, menu_draw_prep, NULL);
 	PicoIn.overclockM68k = currentConfig.overclock_68k; // int vs short
 
 	return 0;
@@ -1990,7 +2001,7 @@ static int menu_loop_snd_options(int id, int keys)
 
 	if (PicoIn.sndRate > 52000 && PicoIn.sndRate < 54000)
 		PicoIn.sndRate = 53000;
-	me_loop(e_menu_snd_options, &sel);
+	me_loop_d(e_menu_snd_options, &sel, menu_draw_prep, NULL);
 
 	return 0;
 }
@@ -2028,7 +2039,7 @@ static int menu_loop_gfx_options(int id, int keys)
 {
 	static int sel = 0;
 
-	me_loop(e_menu_gfx_options, &sel);
+	me_loop_d(e_menu_gfx_options, &sel, menu_draw_prep, NULL);
 
 	return 0;
 }
@@ -2051,7 +2062,7 @@ static int menu_loop_ui_options(int id, int keys)
 {
 	static int sel = 0;
 
-	me_loop(e_menu_ui_options, &sel);
+	me_loop_d(e_menu_ui_options, &sel, menu_draw_prep, NULL);
 
 	return 0;
 }
@@ -2205,7 +2216,7 @@ static int menu_loop_options(int id, int keys)
 	me_enable(e_menu_options, MA_OPT_SAVECFG_GAME, PicoGameLoaded);
 	me_enable(e_menu_options, MA_OPT_LOADCFG, config_slot != config_slot_current);
 
-	me_loop(e_menu_options, &sel);
+	me_loop_d(e_menu_options, &sel, menu_draw_prep, NULL);
 
 	return 0;
 }
@@ -2554,7 +2565,7 @@ void menu_loop(void)
 
 	menu_enter(PicoGameLoaded);
 	in_set_config_int(0, IN_CFG_BLOCKING, 1);
-	me_loop_d(e_menu_main, &sel, NULL, menu_main_draw_status);
+	me_loop_d(e_menu_main, &sel, menu_draw_prep, menu_main_draw_status);
 
 	if (PicoGameLoaded) {
 		if (engineState == PGS_Menu)
@@ -2624,7 +2635,7 @@ int menu_loop_tray(void)
 	menu_enter(PicoGameLoaded);
 
 	in_set_config_int(0, IN_CFG_BLOCKING, 1);
-	me_loop(e_menu_tray, &sel);
+	me_loop_d(e_menu_tray, &sel, menu_draw_prep, NULL);
 
 	if (engineState != PGS_RestartRun) {
 		engineState = PGS_RestartRun;
