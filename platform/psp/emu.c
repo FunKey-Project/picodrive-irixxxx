@@ -210,12 +210,16 @@ static void do_pal_update_sms(void)
 		// SMS palette
 		0x0000, 0x0000, 0x00a0, 0x00f0, 0x0500, 0x0f00, 0x0005, 0x0ff0,
 		0x000a, 0x000f, 0x0055, 0x00ff, 0x0050, 0x0f0f, 0x0555, 0x0fff,
+		// TMS palette
+		0x0000, 0x0000, 0x04c2, 0x07d6, 0x0e55, 0x0f77, 0x055c, 0x0ee4,
+		0x055f, 0x077f, 0x05bc, 0x08ce, 0x03a2, 0x0b5c, 0x0ccc, 0x0fff,
 	};
 	int i;
 	
 	if (!(Pico.video.reg[0] & 0x4)) {
+		int sg = !!(Pico.m.hardware & PMS_HW_SG);
 		for (i = Pico.est.SonicPalCount; i >= 0; i--)
-			do_pal_convert(localPal+i*0x40, tmspal, currentConfig.gamma, currentConfig.gamma2);
+			do_pal_convert(localPal+i*0x40, tmspal+sg*0x10, currentConfig.gamma, currentConfig.gamma2);
 	} else {
 		for (i = Pico.est.SonicPalCount; i >= 0; i--)
 			do_pal_convert(localPal+i*0x40, Pico.est.SonicPal+i*0x40, currentConfig.gamma, currentConfig.gamma2);
@@ -589,7 +593,9 @@ void pemu_prep_defconfig(void)
 	defaultConfig.CPUclock = 333;
 	defaultConfig.filter = EOPT_FILTER_BILINEAR; // bilinear filtering
 	defaultConfig.scaling = EOPT_SCALE_43;
-	defaultConfig.vscaling = EOPT_VSCALE_FULL;
+	defaultConfig.vscaling = EOPT_VSCALE_43;
+	defaultConfig.renderer = RT_8BIT_ACC;
+	defaultConfig.renderer32x = RT_8BIT_ACC;
 	defaultConfig.EmuOpt |= EOPT_SHOW_RTC;
 }
 
@@ -681,18 +687,18 @@ void plat_update_volume(int has_changed, int is_up)
 /* prepare for MD screen mode change */
 void emu_video_mode_change(int start_line, int line_count, int start_col, int col_count)
 {
-	/* NTSC always has 224 visible lines, anything smaller has bars */
-	if (line_count < 224 && line_count > 144) {
-		start_line -= (224-line_count) /2;
-		line_count = 224;
-	}
-
 	out_y = start_line; out_x = start_col;
 	out_h = line_count; out_w = col_count;
 
+	if (col_count == 248) // mind aspect ration when blanking 1st column
+		col_count = 256;
+
 	switch (currentConfig.vscaling) {
-	case EOPT_VSCALE_PAL:
-		vscale = (float)270/240;
+	case EOPT_VSCALE_43:
+		// ugh, mind GG...
+		if (line_count >= 160)
+			line_count = (Pico.m.pal ? 240 : 224);
+		vscale = (float)270/line_count;
 		break;
 	case EOPT_VSCALE_FULL:
 		vscale = (float)270/line_count;
