@@ -314,6 +314,8 @@ static port_read_func *port_readers[3] = {
   read_nothing
 };
 
+static int padTHLatency[3]; // TODO this should be in the save file structures
+
 static NOINLINE u32 port_read(int i)
 {
   u32 data_reg = PicoMem.ioports[i + 1];
@@ -326,10 +328,14 @@ static NOINLINE u32 port_read(int i)
   // disables output before doing TH-low read, so don't emulate it for TH.
   // Decap Attack reportedly doesn't work on Nomad but works on must
   // other MD revisions (different pull-up strength?).
-  if (PicoIn.AHW & (PAHW_32X|PAHW_MCD)) // don't do it on 32X, it breaks WWF Raw
-    out |= 0x7f & ~ctrl_reg;
-  else
-    out |= 0x3f & ~ctrl_reg;
+  u32 mask = 0x3f;
+  if (CYCLES_GE(padTHLatency[i], SekCyclesDone()+100))
+    padTHLatency[i] = SekCyclesDone(); // kludge to cope with cycle wrap
+  if (CYCLES_GE(SekCyclesDone(), padTHLatency[i])) {
+    mask |= 0x40;
+    padTHLatency[i] = SekCyclesDone();
+  }
+  out |= mask & ~ctrl_reg;
 
   in = port_readers[i](i, out);
 
@@ -405,6 +411,14 @@ NOINLINE void io_ports_write(u32 a, u32 d)
         Pico.m.padTHPhase[0]++;
     } else if (!(PicoMem.ioports[a] & 0x40) && (d & 0x40))
       Pico.m.padTHPhase[a - 1]++;
+  }
+
+  // after switching TH to input there's a latency before the pullup value is 
+  // read back as input (see Decap Attack, not in Samurai Showdown, 32x WWF Raw)
+  if (4 <= a && a <= 5) {
+    if ((PicoMem.ioports[a] & 0x40) && !(d & 0x40) && !(PicoMem.ioports[a - 3] & 0x40))
+      // latency after switching to input and output was low
+      padTHLatency[a - 4] = SekCyclesDone() + 25;
   }
 
   // certain IO ports can be used as RAM

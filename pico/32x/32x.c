@@ -54,14 +54,14 @@ void p32x_update_irls(SH2 *active_sh2, unsigned int m68k_cycles)
 
   mrun = sh2_irl_irq(&msh2, mlvl, msh2.state & SH2_STATE_RUN);
   if (mrun) {
-    p32x_sh2_poll_event(&msh2, SH2_IDLE_STATES, m68k_cycles);
+    p32x_sh2_poll_event(&msh2, SH2_IDLE_STATES & ~SH2_STATE_SLEEP, m68k_cycles);
     if (msh2.state & SH2_STATE_RUN)
       sh2_end_run(&msh2, 0);
   }
 
   srun = sh2_irl_irq(&ssh2, slvl, ssh2.state & SH2_STATE_RUN);
   if (srun) {
-    p32x_sh2_poll_event(&ssh2, SH2_IDLE_STATES, m68k_cycles);
+    p32x_sh2_poll_event(&ssh2, SH2_IDLE_STATES & ~SH2_STATE_SLEEP, m68k_cycles);
     if (ssh2.state & SH2_STATE_RUN)
       sh2_end_run(&ssh2, 0);
   }
@@ -212,10 +212,11 @@ void PicoReset32x(void)
     p32x_sh2_poll_event(&ssh2, SH2_IDLE_STATES, SekCyclesDone());
     p32x_pwm_ctl_changed();
     p32x_timers_recalc();
+    Pico32x.vdp_regs[0] &= ~P32XV_Mx; // 32X graphics disabled
   }
 }
 
-static void p32x_start_blank(void)
+static void p32x_render_frame(void)
 {
   if (Pico32xDrawMode != PDM32X_OFF && !PicoIn.skipFrame) {
     int offs, lines;
@@ -228,7 +229,6 @@ static void p32x_start_blank(void)
       lines = 240;
     }
 
-    // XXX: no proper handling of 32col mode..
     if ((Pico32x.vdp_regs[0] & P32XV_Mx) != 0 && // 32x not blanking
         (!(Pico.video.debug_p & PVD_KILL_32X)))
     {
@@ -242,7 +242,10 @@ static void p32x_start_blank(void)
 
     pprof_end(draw);
   }
+}
 
+static void p32x_start_blank(void)
+{
   // enter vblank
   Pico32x.vdp_regs[0x0a/2] |= P32XV_VBLK|P32XV_PEN;
 
@@ -258,17 +261,26 @@ static void p32x_start_blank(void)
   p32x_sh2_poll_event(&ssh2, SH2_STATE_VPOLL, SekCyclesDone());
 }
 
+static void p32x_end_blank(void)
+{
+  // end vblank
+  Pico32x.vdp_regs[0x0a/2] &= ~P32XV_VBLK; // get out of vblank
+  if ((Pico32x.vdp_regs[0] & P32XV_Mx) != 0) // no forced blanking
+    Pico32x.vdp_regs[0x0a/2] &= ~P32XV_PEN; // no palette access
+  if (!(Pico32x.sh2_regs[0] & 0x80))
+    p32x_schedule_hint(NULL, SekCyclesDone());
+
+  p32x_sh2_poll_event(&msh2, SH2_STATE_VPOLL, SekCyclesDone());
+  p32x_sh2_poll_event(&ssh2, SH2_STATE_VPOLL, SekCyclesDone());
+}
+
 void p32x_schedule_hint(SH2 *sh2, unsigned int m68k_cycles)
 {
   // rather rough, 32x hint is useless in practice
   int after;
-
   if (!((Pico32x.sh2irq_mask[0] | Pico32x.sh2irq_mask[1]) & 4))
     return; // nobody cares
-  // note: when Pico.m.scanline is 224, SH2s might
-  // still be at scanline 93 (or so)
-  if (!(Pico32x.sh2_regs[0] & 0x80) &&
-      Pico.m.scanline > (Pico.video.reg[1] & 0x08 ? 240 : 224))
+  if (!(Pico32x.sh2_regs[0] & 0x80) && (Pico.video.status & PVS_VB2))
     return;
 
   after = (Pico32x.sh2_regs[4 / 2] + 1) * 488;
@@ -569,19 +581,9 @@ void sync_sh2s_lockstep(unsigned int m68k_target)
 
 void PicoFrame32x(void)
 {
+  // XXX this is somehow misplaced here
   sh2_execute_prepare(&msh2, PicoIn.opt & POPT_EN_DRC);
   sh2_execute_prepare(&ssh2, PicoIn.opt & POPT_EN_DRC);
-
-  Pico.m.scanline = 0;
-
-  Pico32x.vdp_regs[0x0a/2] &= ~P32XV_VBLK; // get out of vblank
-  if ((Pico32x.vdp_regs[0] & P32XV_Mx) != 0) // no forced blanking
-    Pico32x.vdp_regs[0x0a/2] &= ~P32XV_PEN; // no palette access
-
-  if (!(Pico32x.sh2_regs[0] & 0x80))
-    p32x_schedule_hint(NULL, SekCyclesDone());
-  p32x_sh2_poll_event(&msh2, SH2_STATE_VPOLL, SekCyclesDone());
-  p32x_sh2_poll_event(&ssh2, SH2_STATE_VPOLL, SekCyclesDone());
 
   if (PicoIn.AHW & PAHW_MCD)
     pcd_prepare_frame();
