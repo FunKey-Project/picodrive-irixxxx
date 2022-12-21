@@ -305,7 +305,7 @@ CHDR_OBJS += $(CHDR)/src/libchdr_chd.o $(CHDR)/src/libchdr_cdrom.o
 CHDR_OBJS += $(CHDR)/src/libchdr_flac.o
 CHDR_OBJS += $(CHDR)/src/libchdr_bitstream.o $(CHDR)/src/libchdr_huffman.o
 
-# lzma
+# lzma - use 19.00 as newer versions have compile problems with libretro platforms
 LZMA = $(CHDR)/deps/lzma-19.00
 LZMA_OBJS += $(LZMA)/src/CpuArch.o $(LZMA)/src/Alloc.o $(LZMA)/src/LzmaEnc.o
 LZMA_OBJS += $(LZMA)/src/Sort.o $(LZMA)/src/LzmaDec.o $(LZMA)/src/LzFind.o
@@ -317,8 +317,7 @@ ifneq ($(STATIC_LINKING), 1)
 OBJS += $(LZMA_OBJS)
 endif
 # ouf... prepend includes to overload headers available in the toolchain
-CHDR_I = $(shell find $(CHDR) -name 'include')
-CFLAGS := $(patsubst %, -I%, $(CHDR_I)) $(CFLAGS)
+CFLAGS := -I$(LZMA)/include -I$(CHDR)/include $(CFLAGS)
 endif
 
 ifeq "$(PLATFORM_ZLIB)" "1"

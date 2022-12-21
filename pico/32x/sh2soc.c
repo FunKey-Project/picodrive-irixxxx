@@ -137,15 +137,7 @@ static void dmac_memcpy(struct dma_chan *chan, SH2 *sh2)
 
   if (!up || chan->tcr < 4)
     return;
-#if MARS_CHECK_HACK
-  // XXX Mars Check Program copies 32K longwords (128KB) from a 64KB buffer in
-  // ROM or DRAM to SDRAM in 4-longword mode, overwriting an SDRAM comm area in
-  // turn, which crashes the test on emulators without CPU cache emulation.
-  // This may be a bug in Mars Check. As a kludge limit the transfer to 64KB,
-  // which is what the check program test uses for checking the result.
-  // A better way would clearly be to have a mechanism to patch the ROM...
-  if (size == 3 && chan->tcr == 32768 && chan->dar == 0x06020000) size = 1;
-#endif
+
   if (size == 3) size = 2;  // 4-word xfer mode still counts in words
   // XXX check TCR being a multiple of 4 in 4-word xfer mode?
   // XXX check alignment of sar/dar, generating a bus error if unaligned?
@@ -270,6 +262,7 @@ u32 REGPARM(2) sh2_peripheral_read8(u32 a, SH2 *sh2)
   u8 *r = (void *)sh2->peri_regs;
   u32 d;
 
+  DRC_SAVE_SR(sh2);
   a &= 0x1ff;
   d = PREG8(r, a);
 
@@ -277,10 +270,9 @@ u32 REGPARM(2) sh2_peripheral_read8(u32 a, SH2 *sh2)
     a | ~0x1ff, d, sh2_pc(sh2));
   if ((a & 0x1c0) == 0x140) {
     // abused as comm area
-    DRC_SAVE_SR(sh2);
     p32x_sh2_poll_detect(a, sh2, SH2_STATE_CPOLL, 3);
-    DRC_RESTORE_SR(sh2);
   }
+  DRC_RESTORE_SR(sh2);
   return d;
 }
 
@@ -289,6 +281,7 @@ u32 REGPARM(2) sh2_peripheral_read16(u32 a, SH2 *sh2)
   u16 *r = (void *)sh2->peri_regs;
   u32 d;
 
+  DRC_SAVE_SR(sh2);
   a &= 0x1fe;
   d = r[MEM_BE2(a / 2)];
 
@@ -296,10 +289,9 @@ u32 REGPARM(2) sh2_peripheral_read16(u32 a, SH2 *sh2)
     a | ~0x1ff, d, sh2_pc(sh2));
   if ((a & 0x1c0) == 0x140) {
     // abused as comm area
-    DRC_SAVE_SR(sh2);
     p32x_sh2_poll_detect(a, sh2, SH2_STATE_CPOLL, 3);
-    DRC_RESTORE_SR(sh2);
   }
+  DRC_RESTORE_SR(sh2);
   return d;
 }
 
@@ -307,6 +299,7 @@ u32 REGPARM(2) sh2_peripheral_read32(u32 a, SH2 *sh2)
 {
   u32 d;
 
+  DRC_SAVE_SR(sh2);
   a &= 0x1fc;
   d = sh2->peri_regs[a / 4];
 
@@ -317,10 +310,9 @@ u32 REGPARM(2) sh2_peripheral_read32(u32 a, SH2 *sh2)
     sh2->poll_cnt = 0;
   else if ((a & 0x1c0) == 0x140) {
     // abused as comm area
-    DRC_SAVE_SR(sh2);
     p32x_sh2_poll_detect(a, sh2, SH2_STATE_CPOLL, 3);
-    DRC_RESTORE_SR(sh2);
   }
+  DRC_RESTORE_SR(sh2);
   return d;
 }
 
@@ -364,18 +356,18 @@ void REGPARM(3) sh2_peripheral_write8(u32 a, u32 d, SH2 *sh2)
   u8 *r = (void *)sh2->peri_regs;
   u8 old;
 
+  DRC_SAVE_SR(sh2);
   elprintf_sh2(sh2, EL_32XP, "peri w8  [%08x]       %02x @%06x",
     a, d, sh2_pc(sh2));
 
   a &= 0x1ff;
   old = PREG8(r, a);
+  PREG8(r, a) = d;
 
   switch (a) {
   case 0x002: // SCR - serial control
-    if (!(PREG8(r, a) & 0x20) && (d & 0x20)) { // TE being set
-      PREG8(r, a) = d;
+    if (!(old & 0x20) && (d & 0x20)) // TE being set
       sci_trigger(sh2, r);
-    }
     break;
   case 0x003: // TDR - transmit data
     break;
@@ -383,27 +375,31 @@ void REGPARM(3) sh2_peripheral_write8(u32 a, u32 d, SH2 *sh2)
     d = (old & (d | 0x06)) | (d & 1);
     PREG8(r, a) = d;
     sci_trigger(sh2, r);
-    return;
+    break;
   case 0x005: // RDR - receive data
     break;
   case 0x010: // TIER
     if (d & 0x8e)
       elprintf(EL_32XP|EL_ANOMALY, "TIER: %02x", d);
     d = (d & 0x8e) | 1;
+    PREG8(r, a) = d;
     break;
   case 0x017: // TOCR
     d |= 0xe0;
+    PREG8(r, a) = d;
     break;
+  default:
+    if ((a & 0x1c0) == 0x140)
+      p32x_sh2_poll_event(sh2, SH2_STATE_CPOLL, SekCyclesDone());
   }
-  PREG8(r, a) = d;
-
-  if ((a & 0x1c0) == 0x140)
-    p32x_sh2_poll_event(sh2, SH2_STATE_CPOLL, SekCyclesDone());
+  DRC_RESTORE_SR(sh2);
 }
 
 void REGPARM(3) sh2_peripheral_write16(u32 a, u32 d, SH2 *sh2)
 {
   u16 *r = (void *)sh2->peri_regs;
+
+  DRC_SAVE_SR(sh2);
   elprintf_sh2(sh2, EL_32XP, "peri w16 [%08x]     %04x @%06x",
     a, d, sh2_pc(sh2));
 
@@ -417,12 +413,12 @@ void REGPARM(3) sh2_peripheral_write16(u32 a, u32 d, SH2 *sh2)
     }
     if ((d & 0xff00) == 0x5a00) // WTCNT
       PREG8(r, 0x81) = d;
-    return;
+  } else {
+    r[MEM_BE2(a / 2)] = d;
+    if ((a & 0x1c0) == 0x140)
+      p32x_sh2_poll_event(sh2, SH2_STATE_CPOLL, SekCyclesDone());
   }
-
-  r[MEM_BE2(a / 2)] = d;
-  if ((a & 0x1c0) == 0x140)
-    p32x_sh2_poll_event(sh2, SH2_STATE_CPOLL, SekCyclesDone());
+  DRC_RESTORE_SR(sh2);
 }
 
 void REGPARM(3) sh2_peripheral_write32(u32 a, u32 d, SH2 *sh2)
@@ -431,6 +427,7 @@ void REGPARM(3) sh2_peripheral_write32(u32 a, u32 d, SH2 *sh2)
   u32 old;
   struct dmac *dmac;
 
+  DRC_SAVE_SR(sh2);
   elprintf_sh2(sh2, EL_32XP, "peri w32 [%08x] %08x @%06x",
     a, d, sh2_pc(sh2));
 
@@ -480,17 +477,17 @@ void REGPARM(3) sh2_peripheral_write32(u32 a, u32 d, SH2 *sh2)
       if (!(dmac->dmaor & DMA_DME))
         return;
 
-      DRC_SAVE_SR(sh2);
       if ((dmac->chan[0].chcr & (DMA_TE|DMA_DE)) == DMA_DE)
         dmac_trigger(sh2, &dmac->chan[0]);
       if ((dmac->chan[1].chcr & (DMA_TE|DMA_DE)) == DMA_DE)
         dmac_trigger(sh2, &dmac->chan[1]);
-      DRC_RESTORE_SR(sh2);
       break;
+    default:
+      if ((a & 0x1c0) == 0x140)
+        p32x_sh2_poll_event(sh2, SH2_STATE_CPOLL, SekCyclesDone());
   }
 
-  if ((a & 0x1c0) == 0x140)
-    p32x_sh2_poll_event(sh2, SH2_STATE_CPOLL, SekCyclesDone());
+  DRC_RESTORE_SR(sh2);
 }
 
 /* 32X specific */
