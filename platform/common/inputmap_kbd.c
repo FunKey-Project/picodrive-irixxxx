@@ -112,7 +112,7 @@ const struct menu_keymap in_sdl_key_map[] = {
 	{ SDLK_d,	PBTN_DOWN },
 	{ SDLK_l,	PBTN_LEFT },
 	{ SDLK_r,	PBTN_RIGHT },
-	{ SDLK_RETURN,	PBTN_MOK },
+	{ SDLK_a,	PBTN_MOK },
 	{ SDLK_b,	PBTN_MBACK },
 	{ SDLK_SEMICOLON,	PBTN_MA2 },
 	{ SDLK_QUOTE,	PBTN_MA3 },

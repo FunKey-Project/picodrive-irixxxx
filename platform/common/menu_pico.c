@@ -2290,7 +2290,7 @@ static void draw_frame_debug(void)
 	pemu_forced_frame(1, 0);
 	make_bg(1, 1);
 
-	smalltext_out16(4, 1, "build: r" REVISION "  "__DATE__ " " __TIME__ " " COMPILER, 0xffff);
+	//smalltext_out16(4, 1, "build: r" REVISION "  "__DATE__ " " __TIME__ " " COMPILER, 0xffff);
 	smalltext_out16(4, g_menuscreen_h - me_sfont_h, layer_str, 0xffff);
 }
 
