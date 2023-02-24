@@ -1910,8 +1910,7 @@ void plat_video_flip(void)
 		SDL_Surface *game_surface;
 
 		/* Sega Game Gear -> 160*144 res in 320*240 surface */
-		//if ((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x3) == 0x3){
-		if ((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x01)){
+		if (PicoIn.AHW & PAHW_GG){
 
 			/* Copy Game Gear game pixels */
 			int offset_y = (plat_sdl_screen->h - gg_game_screen->h)/2;
@@ -1957,7 +1956,7 @@ void plat_video_flip(void)
 
     /** Rescale for console */
     /** Game Gear */
-    if((PicoIn.AHW & PAHW_SMS) && (Pico.m.hardware & 0x01)){
+    if (PicoIn.AHW & PAHW_GG){
       scale_for_gg(game_surface, virtual_hw_screen, aspect_ratio);
     }
     /** SMS */
