@@ -204,7 +204,8 @@ extern struct DrZ80 drZ80;
 #define z80_cyclesDone() \
   (Pico.t.z80c_aim - z80_cyclesLeft)
 
-#define cycles_68k_to_z80(x) ((x) * 3822 >> 13)
+// one line has 488 68K cycles and 228 Z80 cycles, 228/488*8192=3827
+#define cycles_68k_to_z80(x) ((x) * 3857 >> 13)
 
 // ----------------------- SH2 CPU -----------------------
 
@@ -447,6 +448,7 @@ struct PicoTiming
   unsigned int z80c_aim;
   unsigned int z80c_line_start;
   int z80_scanline;
+  int z80_buscycles;
 
   int timer_a_next_oflow, timer_a_step; // in z80 cycles
   int timer_b_next_oflow, timer_b_step;
@@ -692,7 +694,7 @@ int CM_compareRun(int cyc, int is_sub);
 // draw.c
 void PicoDrawInit(void);
 PICO_INTERNAL void PicoFrameStart(void);
-void PicoDrawSync(int to, int blank_last_line);
+void PicoDrawSync(int to, int blank_last_line, int limit_sprites);
 void BackFill(int reg7, int sh, struct PicoEState *est);
 void FinalizeLine555(int sh, int line, struct PicoEState *est);
 void FinalizeLine8bit(int sh, int line, struct PicoEState *est);
@@ -705,7 +707,7 @@ extern unsigned char *HighColBase;
 extern int HighColIncrement;
 extern void *DrawLineDestBase;
 extern int DrawLineDestIncrement;
-extern u32 VdpSATCache[128];
+extern u32 VdpSATCache[2*128];
 
 // draw2.c
 void PicoDraw2SetOutBuf(void *dest, int incr);
@@ -890,9 +892,7 @@ static __inline void UpdateSAT(u32 a, u32 d)
   unsigned num = (a^SATaddr) >> 3;
 
   Pico.est.rendstatus |= PDRAW_DIRTY_SPRITES;
-  if (!(a & 4) && num < 128) {
-    ((u16 *)&VdpSATCache[num])[(a&3) >> 1] = d;
-  }
+  ((u16 *)&VdpSATCache[2*num])[(a&7) >> 1] = d;
 }
 static __inline void VideoWriteVRAM(u32 a, u16 d)
 {
