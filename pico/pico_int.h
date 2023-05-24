@@ -506,7 +506,12 @@ struct mcd_pcm
 	} ch[8];
 };
 
-#define PCD_ST_S68K_RST 1
+#define PCD_ST_S68K_RST     1
+#define PCD_ST_S68K_SYNC    2
+#define PCD_ST_S68K_SLEEP   4
+#define PCD_ST_S68K_POLL   16
+#define PCD_ST_M68K_POLL   32
+#define PCD_ST_S68K_IFL2   0x100
 
 struct mcd_misc
 {
@@ -694,6 +699,7 @@ int CM_compareRun(int cyc, int is_sub);
 // draw.c
 void PicoDrawInit(void);
 PICO_INTERNAL void PicoFrameStart(void);
+void PicoDrawRefreshSprites(void);
 void PicoDrawSync(int to, int blank_last_line, int limit_sprites);
 void BackFill(int reg7, int sh, struct PicoEState *est);
 void FinalizeLine555(int sh, int line, struct PicoEState *est);
@@ -916,6 +922,7 @@ int PicoVideoFIFOHint(void);
 void PicoVideoFIFOMode(int active, int h40);
 int PicoVideoFIFOWrite(int count, int byte_p, unsigned sr_mask, unsigned sr_flags);
 void PicoVideoInit(void);
+void PicoVideoSync(int skip);
 void PicoVideoSave(void);
 void PicoVideoLoad(void);
 void PicoVideoCacheSAT(int load);

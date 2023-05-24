@@ -15,10 +15,7 @@
 
 .extern DrawStripInterlace
 
-.equ PDRAW_SPRITES_MOVED, (1<<0)
 .equ PDRAW_WND_DIFF_PRIO, (1<<1)
-.equ PDRAW_PARSE_SPRITES, (1<<2)
-.equ PDRAW_DIRTY_SPRITES, (1<<4)
 .equ PDRAW_PLANE_HI_PRIO, (1<<6)
 .equ PDRAW_SHHI_DONE,     (1<<7)
 .equ PDRAW_32X_SCALE,     (1<<12)
@@ -80,7 +77,7 @@
     beq     0f
     cmp     r4, #0xe
     orr     r4, r3, r4
-    biceq   r4, #0x80
+    biceq   r4, r4, #0x80
     strb    r4, [r1,#\offs]
 0:
 .endm
@@ -388,8 +385,8 @@ DrawLayer:
     beq     0f
     cmp     r3, #2
     mov     r3, r2, lsl #2        @ htab+=DrawScanline<<1; // Offset by line
-    biceq   r3, #0x1f             @ htab&=~0xf; // Offset by tile
-    andlt   r3, #0x1f
+    biceq   r3, r3, #0x1f         @ htab&=~0xf; // Offset by tile
+    andlt   r3, r3, #0x1f
     add     r4, r4, r3
 0:  add     r4, r4, r0, lsl #1    @ htab+=plane
     bic     r4, r4, #0x00ff0000   @ just in case
@@ -614,7 +611,7 @@ DrawLayer:
     @ r4 & r7 are scratch in this loop
 
     @ need to calc new ty?
-    lsls    r7, r10, #7           @ (cell&1)?
+    movs    r7, r10, lsl #7       @ (cell&1)?
     bmi     .dsloop_vs_subr1
 
     @ calc offset and read tileline code to r7, also calc ty
@@ -647,7 +644,7 @@ DrawLayer:
     ble     .dsloop_vs_exit
 
     @ need to calc new ty?
-    lsls    r7, r10, #7           @ (cell&1)?
+    movs    r7, r10, lsl #7       @ (cell&1)?
     bmi     0f
 
     @ calc offset and read tileline code to r7, also calc ty
@@ -800,11 +797,7 @@ DrawLayer:
 BackFill:
     stmfd   sp!, {r4-r9,lr}
 
-    mov     r0, r0, lsl #26
     ldr     lr, [r2, #OFS_EST_HighCol]
-    mov     r0, r0, lsr #26
-    add     lr, lr, #8
-
     orr     r0, r0, r1, lsl #7
     orr     r0, r0, r0, lsl #8
     orr     r0, r0, r0, lsl #16
@@ -818,6 +811,7 @@ BackFill:
     mov     r7, r0
 
     @ go go go!
+    add     lr, lr, #8
     stmia   lr!, {r0-r7} @ 10*8*4
     stmia   lr!, {r0-r7}
     stmia   lr!, {r0-r7}
@@ -2065,7 +2059,7 @@ FinalizeLine555:
     and     r8, lr, r8, lsl #1
     ldrh    r8, [r3, r8]
     and     r8, r8, r9
-    lsl     r8, r8, #16
+    mov     r8, r8, lsl #16
 
 .fl_20loop_bl2:
     ldr     r12, [r1], #4

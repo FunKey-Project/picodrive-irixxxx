@@ -38,7 +38,7 @@ static void SekExecM68k(int cyc_do)
   SekCyclesLeft = 0;
 }
 
-static void SekSyncM68k(void)
+static int SekSyncM68k(int once)
 {
   int cyc_do;
 
@@ -47,28 +47,35 @@ static void SekSyncM68k(void)
 
   while ((cyc_do = Pico.t.m68c_aim - Pico.t.m68c_cnt) > 0) {
     // the Z80 CPU is stealing some bus cycles from the 68K main CPU when 
-    // accessing the 68K RAM or ROM. Account for these by shortening the time
+    // accessing the main bus. Account for these by shortening the time
     // the 68K CPU runs.
-    int z80_buscyc = Pico.t.z80_buscycles;
+    int z80_buscyc = Pico.t.z80_buscycles >> (~Pico.m.scanline & 1);
     if (z80_buscyc <= cyc_do)
       SekExecM68k(cyc_do - z80_buscyc);
     else
       z80_buscyc = cyc_do;
     Pico.t.m68c_cnt += z80_buscyc;
     Pico.t.z80_buscycles -= z80_buscyc;
+    if (once) break;
   }
 
   SekTrace(0);
   pevt_log_m68k_o(EVT_RUN_END);
   pprof_end(m68k);
+
+  return Pico.t.m68c_aim > Pico.t.m68c_cnt;
 }
 
 static __inline void SekRunM68k(int cyc)
 {
+  // refresh slowdown handling, 2 cycles every 128 - make this 1 every 64
+  // NB must be quite accurate, so handle fractions as well (c/f OutRunners)
+  static int refresh;
+  Pico.t.m68c_cnt += (cyc + refresh) >> 6;
+  refresh = (cyc + refresh) & 0x3f;
   Pico.t.m68c_aim += cyc;
-  Pico.t.m68c_cnt += cyc >> 6; // refresh slowdowns
 
-  SekSyncM68k();
+  SekSyncM68k(0);
 }
 
 static void SyncCPUs(unsigned int cycles)
@@ -101,8 +108,10 @@ static void do_timing_hacks_end(struct PicoVideo *pv)
   PicoVideoFIFOSync(CYCLES_M68K_LINE);
 
   // need rather tight Z80 sync for emulation of main bus cycle stealing
-  if (Pico.m.z80Run && !Pico.m.z80_reset && (PicoIn.opt&POPT_EN_Z80) && (Pico.m.scanline&1))
-    PicoSyncZ80(Pico.t.m68c_aim);
+  if (Pico.m.scanline&1) {
+    if (Pico.m.z80Run && !Pico.m.z80_reset && (PicoIn.opt&POPT_EN_Z80))
+      PicoSyncZ80(Pico.t.m68c_aim);
+  }
 }
 
 static void do_timing_hacks_start(struct PicoVideo *pv)
@@ -162,10 +171,12 @@ static int PicoFrameHints(void)
     {
       // find the right moment for frame renderer, when display is no longer blanked
       if ((pv->reg[1]&0x40) || y > 100) {
-        PicoFrameFull();
+        if (Pico.est.rendstatus & PDRAW_SYNC_NEEDED)
+          PicoFrameFull();
 #ifdef DRAW_FINISH_FUNC
         DRAW_FINISH_FUNC();
 #endif
+        Pico.est.rendstatus &= ~PDRAW_SYNC_NEEDED;
         skip = 1;
       }
     }
@@ -185,10 +196,11 @@ static int PicoFrameHints(void)
   if (!skip)
   {
     if (Pico.est.DrawScanline < y)
-      PicoDrawSync(y - 1, 0, 0);
+      PicoVideoSync(-1);
 #ifdef DRAW_FINISH_FUNC
     DRAW_FINISH_FUNC();
 #endif
+    Pico.est.rendstatus &= ~PDRAW_SYNC_NEEDED;
   }
 #ifdef PICO_32X
   p32x_render_frame();
@@ -291,7 +303,7 @@ static int PicoFrameHints(void)
     while (l-- > 0) {
       Pico.t.m68c_cnt -= CYCLES_M68K_LINE;
       do_timing_hacks_start(pv);
-      SekSyncM68k();
+      SekSyncM68k(0);
       do_timing_hacks_end(pv);
     }
   }

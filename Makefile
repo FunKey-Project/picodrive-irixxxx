@@ -1,5 +1,6 @@
 $(LD) ?= $(CC)
 TARGET ?= PicoDrive
+ASAN ?= 0
 DEBUG ?= 0
 CFLAGS += -I$(PWD)
 CYCLONE_CC ?= gcc
@@ -41,20 +42,41 @@ ifneq ($(findstring gcc,$(shell $(CC) -v 2>&1)),)
 endif
 endif
 
+ifeq "$(ASAN)" "1"
+	CFLAGS += -fsanitize=address -fsanitize=leak -fsanitize=bounds -fno-omit-frame-pointer -fno-common -O1 -g
+	LDLIBS += -fsanitize=address -fsanitize=leak -fsanitize=bounds -static-libasan
+else
 ifeq "$(DEBUG)" "0"
 	CFLAGS += -O3 -DNDEBUG
+endif
 endif
 	LD = $(CC)
 	OBJOUT ?= -o
 	LINKOUT ?= -o
 endif
 
+
+chkCCflag = $(shell n=/dev/null; echo $(1) | tr " " "\n" | while read f; do \
+	    $(CC) $$f -x c -c $$n -o $$n 2>$$n && echo "_$$f" | tr -d _; done)
+
 ifeq ("$(PLATFORM)",$(filter "$(PLATFORM)","gp2x" "opendingux" "miyoo" "rpi1"))
 # very small caches, avoid optimization options making the binary much bigger
-CFLAGS += -finline-limit=42 -fno-unroll-loops -fno-ipa-cp -ffast-math
-# this gets you about 20% better execution speed on 32bit arm/mips
-CFLAGS += -fno-common -fno-stack-protector -fno-guess-branch-probability -fno-caller-saves -fno-tree-loop-if-convert -fno-regmove
+CFLAGS += -fno-common -fno-stack-protector -finline-limit=42 -fno-unroll-loops -ffast-math
+ifneq ($(call chkCCflag, -fipa-ra),) # gcc >= 5
+CFLAGS += $(call chkCCflag, -flto -fipa-pta -fipa-ra)
+else
+# these improve execution speed on 32bit arm/mips with gcc pre-5 toolchains
+CFLAGS += -fno-ipa-cp -fno-caller-saves -fno-guess-branch-probability -fno-regmove
+# very old gcc toolchains may not have these options
+CFLAGS += $(call chkCCflag, -fno-tree-loop-if-convert -fipa-pta)
 endif
+endif
+
+# revision info from repository if this not a tagged release
+ifeq "$(shell git describe --tags --exact-match HEAD 2>/dev/null)" ""
+REVISION ?= -$(shell git rev-parse --short HEAD || echo ???)
+endif
+CFLAGS += -DREVISION=\"$(REVISION)\"
 
 # default settings
 use_libchdr ?= 1
@@ -211,7 +233,6 @@ OBJS += platform/gp2x/vid_pollux.o
 OBJS += platform/gp2x/warm.o 
 USE_FRONTEND = 1
 PLATFORM_MP3 = 1
-PLATFORM_ZLIB = 1
 endif
 ifeq "$(PLATFORM)" "psp"
 CFLAGS += -DUSE_BGR565 -G8 # -DLPRINTF_STDIO -DFW15
@@ -246,8 +267,6 @@ endif
 ifeq "$(USE_LIBRETRO_VFS)" "1"
 OBJS += platform/libretro/libretro-common/memmap/memmap.o
 endif
-
-PLATFORM_ZLIB ?= 1
 endif
 
 ifeq "$(USE_FRONTEND)" "1"
@@ -427,12 +446,13 @@ pico/carthw_cfg.c: pico/carthw.cfg
 # preprocessed asm files most probably include the offsets file
 $(filter %.S,$(SRCS_COMMON)): pico/pico_int_offs.h
 
-# random deps
+# random deps - TODO remove this and compute dependcies automatically
 pico/carthw/svp/compiler.o : cpu/drc/emit_arm.c
 cpu/sh2/compiler.o : cpu/drc/emit_arm.c cpu/drc/emit_arm64.c cpu/drc/emit_ppc.c
 cpu/sh2/compiler.o : cpu/drc/emit_x86.c cpu/drc/emit_mips.c cpu/drc/emit_riscv.c
 cpu/sh2/mame/sh2pico.o : cpu/sh2/mame/sh2.c
-pico/pico.o pico/cd/mcd.o pico/32x/32x.o : pico/pico_cmn.c pico/pico_int.h
-pico/memory.o pico/cd/memory.o pico/32x/memory.o : pico/pico_int.h pico/memory.h
+pico/pico.o pico/cd/mcd.o pico/32x/32x.o : pico/pico_cmn.c
+pico/memory.o pico/cd/memory.o pico/32x/memory.o : pico/memory.h
+$(shell grep -rl pico_int.h pico) : pico/pico_int.h
 # pico/cart.o : pico/carthw_cfg.c
 cpu/fame/famec.o: cpu/fame/famec.c cpu/fame/famec_opcodes.h
