@@ -23,6 +23,9 @@ MAKE_68K_WRITE16(s68k_write16, s68k_write16_map)
 MAKE_68K_WRITE32(s68k_write32, s68k_write16_map)
 #endif
 
+u32 pcd_base_address;
+#define BASE pcd_base_address
+
 // -----------------------------------------------------------------
 
 // provided by ASM code:
@@ -92,6 +95,14 @@ void m68k_comm_check(u32 a)
   }
 }
 
+u32 pcd_stopwatch_read(int sub)
+{
+  // ugh..
+  u32 d = sub ? SekCyclesDoneS68k() : pcd_cycles_m68k_to_s68k(SekCyclesDone());
+  d = (d - Pico_mcd->m.stopwatch_base_c) / 384;
+  return d & 0x0fff;
+}
+
 #ifndef _ASM_CD_MEMORY_C
 static u32 m68k_reg_read16(u32 a)
 {
@@ -113,19 +124,16 @@ static u32 m68k_reg_read16(u32 a)
       d = Pico_mcd->s68k_regs[4]<<8;
       goto end;
     case 6:
-      d = *(u16 *)(Pico_mcd->bios + 0x72);
+      d = *(u16 *)(Pico.rom + 0x72);
       goto end;
     case 8:
       d = cdc_host_r();
       goto end;
-    case 0xA:
+    case 0xa:
       elprintf(EL_UIO, "m68k FIXME: reserved read");
       goto end;
-    case 0xC: // 384 cycle stopwatch timer
-      // ugh..
-      d = pcd_cycles_m68k_to_s68k(SekCyclesDone());
-      d = (d - Pico_mcd->m.stopwatch_base_c) / 384;
-      d &= 0x0fff;
+    case 0xc: // 384 cycle stopwatch timer
+      d = pcd_stopwatch_read(0);
       elprintf(EL_CDREGS, "m68k stopwatch timer read (%04x)", d);
       goto end;
   }
@@ -169,8 +177,8 @@ void m68k_reg_write8(u32 a, u32 d)
     case 1:
       d &= 3;
       dold = Pico_mcd->m.busreq;
-      if (!(d & 1))
-        d |= 2; // verified: can't release bus on reset
+//      if (!(d & 1))
+//        d |= 2; // verified: can't release bus on reset
       if (dold == d)
         return;
 
@@ -185,7 +193,7 @@ void m68k_reg_write8(u32 a, u32 d)
         elprintf(EL_CDREGS, "m68k: resetting s68k");
         SekResetS68k();
       }
-      if ((dold ^ d) & 2) {
+      if (((dold & 3) == 1) != ((d & 3) == 1)) {
         elprintf(EL_INTSW, "m68k: s68k brq %i", d >> 1);
         remap_prg_window(d, Pico_mcd->s68k_regs[3]);
       }
@@ -218,12 +226,12 @@ void m68k_reg_write8(u32 a, u32 d)
         remap_word_ram(d);
       goto write_comm;
     case 6:
-      Pico_mcd->bios[MEM_BE2(0x72)] = d; // simple hint vector changer
+      Pico.rom[MEM_BE2(0x72)] = d; // simple hint vector changer
       return;
     case 7:
-      Pico_mcd->bios[MEM_BE2(0x73)] = d;
+      Pico.rom[MEM_BE2(0x73)] = d;
       elprintf(EL_CDREGS, "hint vector set to %04x%04x",
-        ((u16 *)Pico_mcd->bios)[0x70/2], ((u16 *)Pico_mcd->bios)[0x72/2]);
+        ((u16 *)Pico.rom)[0x70/2], ((u16 *)Pico.rom)[0x72/2]);
       return;
     case 8:
       (void) cdc_host_r(); // acts same as reading
@@ -328,10 +336,8 @@ u32 s68k_reg_read16(u32 a)
     case 8:
       d = cdc_host_r();
       goto end;
-    case 0xC:
-      d = SekCyclesDoneS68k() - Pico_mcd->m.stopwatch_base_c;
-      d /= 384;
-      d &= 0x0fff;
+    case 0xc:
+      d = pcd_stopwatch_read(1);
       elprintf(EL_CDREGS, "s68k stopwatch timer read (%04x)", d);
       goto end;
     case 0x30:
@@ -659,24 +665,44 @@ static void PicoWriteM68k16_cell1(u32 a, u32 d)
 }
 #endif
 
-// RAM cart (40000 - 7fffff, optional)
+// BIOS faking for MSU-MD, checks for "SEGA" at 0x400100 to detect CD drive
+static u8 bios_id[4] = "SEGA";
+
+static u32 PicoReadM68k8_bios(u32 a)
+{
+  if ((a & 0xfffffc) == BASE+0x100) // CD detection by MSU
+    return bios_id[a&3];
+  return 0;
+}
+
+static u32 PicoReadM68k16_bios(u32 a)
+{
+  if ((a & 0xfffffc) == BASE+0x100) // CD detection by MSU
+    return (bios_id[a&2]<<8) | bios_id[(a&2)+1];
+  return 0;
+}
+
+// RAM cart (400000 - 7fffff, optional)
 static u32 PicoReadM68k8_ramc(u32 a)
 {
   u32 d = 0;
-  if ((a & 0xf00001) == 0x400001) {
-    if (Pico.sv.data != NULL)
-      d = 3; // 64k cart
-    return d;
-  }
 
-  if ((a & 0xf00001) == 0x600001) {
-    if (Pico.sv.data != NULL)
-      d = Pico.sv.data[((a >> 1) & 0xffff) + 0x2000];
-    return d;
-  }
+  if (PicoIn.opt & POPT_EN_MCD_RAMCART) {
+    if ((a & 0xf00001) == 0x400001) {
+      if (Pico.sv.data != NULL)
+        d = 3; // 64k cart
+      return d;
+    }
 
-  if ((a & 0xf00001) == 0x700001)
-    return Pico_mcd->m.bcram_reg;
+    if ((a & 0xf00001) == 0x600001) {
+      if (Pico.sv.data != NULL)
+        d = Pico.sv.data[((a >> 1) & 0xffff) + 0x2000];
+      return d;
+    }
+
+    if ((a & 0xf00001) == 0x700001)
+      return Pico_mcd->m.bcram_reg;
+  }
 
   elprintf(EL_UIO, "m68k unmapped r8  [%06x] @%06x", a, SekPc);
   return d;
@@ -684,23 +710,25 @@ static u32 PicoReadM68k8_ramc(u32 a)
 
 static u32 PicoReadM68k16_ramc(u32 a)
 {
-  elprintf(EL_ANOMALY, "ramcart r16: [%06x] @%06x", a, SekPcS68k);
+  elprintf(EL_ANOMALY, "ramcart r16: [%06x] @%06x", a, SekPc);
   return PicoReadM68k8_ramc(a + 1);
 }
 
 static void PicoWriteM68k8_ramc(u32 a, u32 d)
 {
-  if ((a & 0xf00001) == 0x600001) {
-    if (Pico.sv.data != NULL && (Pico_mcd->m.bcram_reg & 1)) {
-      Pico.sv.data[((a >> 1) & 0xffff) + 0x2000] = d;
-      Pico.sv.changed = 1;
+  if (PicoIn.opt & POPT_EN_MCD_RAMCART) {
+    if ((a & 0xf00001) == 0x600001) {
+      if (Pico.sv.data != NULL && (Pico_mcd->m.bcram_reg & 1)) {
+        Pico.sv.data[((a >> 1) & 0xffff) + 0x2000] = d;
+        Pico.sv.changed = 1;
+      }
+      return;
     }
-    return;
-  }
 
-  if ((a & 0xf00001) == 0x700001) {
-    Pico_mcd->m.bcram_reg = d;
-    return;
+    if ((a & 0xf00001) == 0x700001) {
+      Pico_mcd->m.bcram_reg = d;
+      return;
+    }
   }
 
   elprintf(EL_UIO, "m68k unmapped w8  [%06x]   %02x @%06x",
@@ -1093,13 +1121,12 @@ static const void *s68k_dec_write16[2][4] = {
 
 static void remap_prg_window(u32 r1, u32 r3)
 {
-  // PRG RAM
-  if (r1 & 2) {
+  // PRG RAM, mapped to main CPU if sub is not running
+  if ((r1 & 3) != 1) {
     void *bank = Pico_mcd->prg_ram_b[(r3 >> 6) & 3];
-    cpu68k_map_all_ram(0x020000, 0x03ffff, bank, 0);
-  }
-  else {
-    m68k_map_unmap(0x020000, 0x03ffff);
+    cpu68k_map_all_ram(BASE+0x020000, BASE+0x03ffff, bank, 0);
+  } else {
+    m68k_map_unmap(BASE+0x020000, BASE+0x03ffff);
   }
 }
 
@@ -1145,14 +1172,14 @@ static void remap_word_ram(u32 r3)
     // 2M mode.
     bank = Pico_mcd->word_ram2M;
     if (r3 & 1) {
-      cpu68k_map_all_ram(0x200000, 0x23ffff, bank, 0);
+      cpu68k_map_all_ram(BASE+0x200000, BASE+0x23ffff, bank, 0);
       cpu68k_map_all_funcs(0x80000, 0xbffff,
           s68k_wordram_main_read8, s68k_wordram_main_read16,
           s68k_wordram_main_write8, s68k_wordram_main_write16, 1);
     } else {
       Pico_mcd->m.state_flags &= ~PCD_ST_S68K_SLEEP;
       cpu68k_map_all_ram(0x080000, 0x0bffff, bank, 1);
-      m68k_map_unmap(0x200000, 0x23ffff);
+      m68k_map_unmap(BASE+0x200000, BASE+0x23ffff);
     }
     // TODO: handle 0x0c0000
   }
@@ -1161,11 +1188,11 @@ static void remap_word_ram(u32 r3)
     int m = (r3 & 0x18) >> 3;
     Pico_mcd->m.state_flags &= ~PCD_ST_S68K_SLEEP;
     bank = Pico_mcd->word_ram1M[b0];
-    cpu68k_map_all_ram(0x200000, 0x21ffff, bank, 0);
+    cpu68k_map_all_ram(BASE+0x200000, BASE+0x21ffff, bank, 0);
     bank = Pico_mcd->word_ram1M[b0 ^ 1];
     cpu68k_map_all_ram(0x0c0000, 0x0effff, bank, 1);
     // "cell arrange" on m68k
-    cpu68k_map_all_funcs(0x220000, 0x23ffff,
+    cpu68k_map_all_funcs(BASE+0x220000, BASE+0x23ffff,
         m68k_cell_read8[b0], m68k_cell_read16[b0],
         m68k_cell_write8[b0], m68k_cell_write16[b0], 0);
     // "decode format" on s68k
@@ -1187,7 +1214,7 @@ void pcd_state_loaded_mem(void)
   Pico_mcd->m.dmna_ret_2m &= 3;
 
   // restore hint vector
-  *(u16 *)(Pico_mcd->bios + 0x72) = Pico_mcd->m.hint_vector;
+  *(u16 *)(Pico.rom + 0x72) = Pico_mcd->m.hint_vector;
 }
 
 #ifdef EMU_M68K
@@ -1196,12 +1223,20 @@ static void m68k_mem_setup_cd(void);
 
 PICO_INTERNAL void PicoMemSetupCD(void)
 {
+  if (!Pico_mcd)
+    Pico_mcd = plat_mmap(0x05000000, sizeof(mcd_state), 0, 0);
+  pcd_base_address = (Pico.romsize > 0x20000 ? 0x400000 : 0x000000);
+
   // setup default main68k map
   PicoMemSetup();
 
-  // main68k map (BIOS mapped by PicoMemSetup()):
+  // main68k map (BIOS or MSU mapped by PicoMemSetup()):
+  if (Pico.romsize > 0x20000) {
+    // MSU cartridge. Fake BIOS detection
+    cpu68k_map_set(m68k_read8_map,   0x400000, 0x41ffff, PicoReadM68k8_bios, 1);
+    cpu68k_map_set(m68k_read16_map,  0x400000, 0x41ffff, PicoReadM68k16_bios, 1);
   // RAM cart
-  if (PicoIn.opt & POPT_EN_MCD_RAMCART) {
+  } else {
     cpu68k_map_set(m68k_read8_map,   0x400000, 0x7fffff, PicoReadM68k8_ramc, 1);
     cpu68k_map_set(m68k_read16_map,  0x400000, 0x7fffff, PicoReadM68k16_ramc, 1);
     cpu68k_map_set(m68k_write8_map,  0x400000, 0x7fffff, PicoWriteM68k8_ramc, 1);
@@ -1215,30 +1250,30 @@ PICO_INTERNAL void PicoMemSetupCD(void)
   cpu68k_map_set(m68k_write16_map, 0xa10000, 0xa1ffff, PicoWrite16_mcd_io, 1);
 
   // sub68k map
-  cpu68k_map_set(s68k_read8_map,   0x000000, 0xffffff, s68k_unmapped_read8, 1);
-  cpu68k_map_set(s68k_read16_map,  0x000000, 0xffffff, s68k_unmapped_read16, 1);
-  cpu68k_map_set(s68k_write8_map,  0x000000, 0xffffff, s68k_unmapped_write8, 1);
-  cpu68k_map_set(s68k_write16_map, 0x000000, 0xffffff, s68k_unmapped_write16, 1);
+  cpu68k_map_set(s68k_read8_map,   0x000000, 0xffffff, s68k_unmapped_read8, 3);
+  cpu68k_map_set(s68k_read16_map,  0x000000, 0xffffff, s68k_unmapped_read16, 3);
+  cpu68k_map_set(s68k_write8_map,  0x000000, 0xffffff, s68k_unmapped_write8, 3);
+  cpu68k_map_set(s68k_write16_map, 0x000000, 0xffffff, s68k_unmapped_write16, 3);
 
   // PRG RAM
-  cpu68k_map_set(s68k_read8_map,   0x000000, 0x07ffff, Pico_mcd->prg_ram, 0);
-  cpu68k_map_set(s68k_read16_map,  0x000000, 0x07ffff, Pico_mcd->prg_ram, 0);
-  cpu68k_map_set(s68k_write8_map,  0x000000, 0x07ffff, Pico_mcd->prg_ram, 0);
-  cpu68k_map_set(s68k_write16_map, 0x000000, 0x07ffff, Pico_mcd->prg_ram, 0);
-  cpu68k_map_set(s68k_write8_map,  0x000000, 0x01ffff, PicoWriteS68k8_prgwp, 1);
-  cpu68k_map_set(s68k_write16_map, 0x000000, 0x01ffff, PicoWriteS68k16_prgwp, 1);
+  cpu68k_map_set(s68k_read8_map,   0x000000, 0x07ffff, Pico_mcd->prg_ram, 2);
+  cpu68k_map_set(s68k_read16_map,  0x000000, 0x07ffff, Pico_mcd->prg_ram, 2);
+  cpu68k_map_set(s68k_write8_map,  0x000000, 0x07ffff, Pico_mcd->prg_ram, 2);
+  cpu68k_map_set(s68k_write16_map, 0x000000, 0x07ffff, Pico_mcd->prg_ram, 2);
+  cpu68k_map_set(s68k_write8_map,  0x000000, 0x01ffff, PicoWriteS68k8_prgwp, 3);
+  cpu68k_map_set(s68k_write16_map, 0x000000, 0x01ffff, PicoWriteS68k16_prgwp, 3);
 
   // BRAM
-  cpu68k_map_set(s68k_read8_map,   0xfe0000, 0xfeffff, PicoReadS68k8_bram, 1);
-  cpu68k_map_set(s68k_read16_map,  0xfe0000, 0xfeffff, PicoReadS68k16_bram, 1);
-  cpu68k_map_set(s68k_write8_map,  0xfe0000, 0xfeffff, PicoWriteS68k8_bram, 1);
-  cpu68k_map_set(s68k_write16_map, 0xfe0000, 0xfeffff, PicoWriteS68k16_bram, 1);
+  cpu68k_map_set(s68k_read8_map,   0xfe0000, 0xfeffff, PicoReadS68k8_bram, 3);
+  cpu68k_map_set(s68k_read16_map,  0xfe0000, 0xfeffff, PicoReadS68k16_bram, 3);
+  cpu68k_map_set(s68k_write8_map,  0xfe0000, 0xfeffff, PicoWriteS68k8_bram, 3);
+  cpu68k_map_set(s68k_write16_map, 0xfe0000, 0xfeffff, PicoWriteS68k16_bram, 3);
 
   // PCM, regs
-  cpu68k_map_set(s68k_read8_map,   0xff0000, 0xffffff, PicoReadS68k8_pr, 1);
-  cpu68k_map_set(s68k_read16_map,  0xff0000, 0xffffff, PicoReadS68k16_pr, 1);
-  cpu68k_map_set(s68k_write8_map,  0xff0000, 0xffffff, PicoWriteS68k8_pr, 1);
-  cpu68k_map_set(s68k_write16_map, 0xff0000, 0xffffff, PicoWriteS68k16_pr, 1);
+  cpu68k_map_set(s68k_read8_map,   0xff0000, 0xffffff, PicoReadS68k8_pr, 3);
+  cpu68k_map_set(s68k_read16_map,  0xff0000, 0xffffff, PicoReadS68k16_pr, 3);
+  cpu68k_map_set(s68k_write8_map,  0xff0000, 0xffffff, PicoWriteS68k8_pr, 3);
+  cpu68k_map_set(s68k_write16_map, 0xff0000, 0xffffff, PicoWriteS68k16_pr, 3);
 
   // RAMs
   remap_prg_window(2,1);
@@ -1265,37 +1300,6 @@ PICO_INTERNAL void PicoMemSetupCD(void)
   PicoCpuFS68k.write_byte = (void *)s68k_write8;
   PicoCpuFS68k.write_word = (void *)s68k_write16;
   PicoCpuFS68k.write_long = (void *)s68k_write32;
-
-  // setup FAME fetchmap
-  {
-#if defined __clang__ || defined HW_WUP
-    volatile // prevent strange relocs from clang
-#endif
-    uptr ptr_ram = (uptr)PicoMem.ram;
-    int i;
-
-    // M68k
-    // by default, point everything to fitst 64k of ROM (BIOS)
-    for (i = 0; i < M68K_FETCHBANK1; i++)
-      PicoCpuFM68k.Fetch[i] = (uptr)Pico.rom - (i<<(24-FAMEC_FETCHBITS));
-    // now real ROM (BIOS)
-    for (i = 0; i < M68K_FETCHBANK1 && (i<<(24-FAMEC_FETCHBITS)) < Pico.romsize; i++)
-      PicoCpuFM68k.Fetch[i] = (uptr)Pico.rom;
-    // .. and RAM
-    for (i = M68K_FETCHBANK1*14/16; i < M68K_FETCHBANK1; i++)
-      PicoCpuFM68k.Fetch[i] = ptr_ram - (i<<(24-FAMEC_FETCHBITS));
-    // S68k
-    // PRG RAM is default
-    for (i = 0; i < M68K_FETCHBANK1; i++)
-      PicoCpuFS68k.Fetch[i] = (uptr)Pico_mcd->prg_ram - (i<<(24-FAMEC_FETCHBITS));
-    // real PRG RAM
-    for (i = 0; i < M68K_FETCHBANK1 && (i<<(24-FAMEC_FETCHBITS)) < 0x80000; i++)
-      PicoCpuFS68k.Fetch[i] = (uptr)Pico_mcd->prg_ram;
-    // WORD RAM 2M area
-    for (i = M68K_FETCHBANK1*0x08/0x100; i < M68K_FETCHBANK1 && (i<<(24-FAMEC_FETCHBITS)) < 0xc0000; i++)
-      PicoCpuFS68k.Fetch[i] = (uptr)Pico_mcd->word_ram2M - 0x80000;
-    // remap_word_ram() will setup word ram for both
-  }
 #endif
 #ifdef EMU_M68K
   m68k_mem_setup_cd();
