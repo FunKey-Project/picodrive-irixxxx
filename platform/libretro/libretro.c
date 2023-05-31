@@ -1275,7 +1275,7 @@ static const char *find_bios(int *region, const char *cd_fname)
    FILE *f = NULL;
 
    // look for MSU.MD rom file. XXX another extension list? ugh...
-   static const char *md_exts[] = { "gen", "smd", "md", "32x" };
+   static const char *md_exts[] = { "gen", "smd", "md", "32x", "zip" };
    char *ext = strrchr(cd_fname, '.');
    int extpos = ext ? ext-cd_fname : strlen(cd_fname);
    strcpy(path, cd_fname);
