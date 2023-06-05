@@ -9,8 +9,7 @@ git submodule update --remote --recursive
 ./configure --platform=generic --sound-drivers=sdl
 make clean
 make
-/opt/FunKey-sdk/bin/arm-funkey-linux-musleabihf-strip PicoDrive
-cp PicoDrive opk/
+cp .od_data/PicoDrive opk/
 cp icons/picodrive.png opk/
 cp AUTHORS COPYING README opk/
 cp picodrive.sh opk/
