@@ -78,6 +78,7 @@ config_mak="config.mak"
 fail()
 {
   echo "$@"
+  if test -n "$DUMP_CONFIG_LOG"; then cat config.log; fi
   exit 1
 }
 
@@ -140,6 +141,7 @@ set_platform()
     optimize_cortexa8="yes"
     have_arm_neon="yes"
     have_libavcodec="yes"
+    MFLAGS="-mcpu=cortex-a8 -mfpu=neon -mfloat-abi=softfp"
     ;;
   gp2x | wiz | caanoo)
     sound_drivers="oss"

@@ -205,7 +205,7 @@ extern struct DrZ80 drZ80;
   (Pico.t.z80c_aim - z80_cyclesLeft)
 
 // one line has 488 68K cycles and 228 Z80 cycles, 228/488*8192=3827
-#define cycles_68k_to_z80(x) ((x) * 3857 >> 13)
+#define cycles_68k_to_z80(x) ((x) * 3847 >> 13)
 
 // ----------------------- SH2 CPU -----------------------
 
@@ -770,7 +770,7 @@ int gfx_context_load(const unsigned char *state);
 void DmaSlowCell(u32 source, u32 a, int len, unsigned char inc);
 
 // cd/memory.c
-extern unsigned int pcd_base_address;
+extern u32 pcd_base_address;
 PICO_INTERNAL void PicoMemSetupCD(void);
 u32 PicoRead8_mcd_io(u32 a);
 u32 PicoRead16_mcd_io(u32 a);
@@ -996,6 +996,7 @@ void Pico32xStartup(void);
 void PicoUnload32x(void);
 void PicoFrame32x(void);
 void Pico32xStateLoaded(int is_early);
+void Pico32xPrepare(void);
 void p32x_sync_sh2s(unsigned int m68k_target);
 void p32x_sync_other_sh2(SH2 *sh2, unsigned int m68k_target);
 void p32x_update_irls(SH2 *active_sh2, unsigned int m68k_cycles);
@@ -1020,14 +1021,14 @@ void PicoMemSetup32x(void);
 void Pico32xSwapDRAM(int b);
 void Pico32xMemStateLoaded(void);
 void p32x_update_banks(void);
-void p32x_m68k_poll_event(u32 flags);
+void p32x_m68k_poll_event(u32 a, u32 flags);
 u32 REGPARM(3) p32x_sh2_poll_memory8(u32 a, u32 d, SH2 *sh2);
 u32 REGPARM(3) p32x_sh2_poll_memory16(u32 a, u32 d, SH2 *sh2);
 u32 REGPARM(3) p32x_sh2_poll_memory32(u32 a, u32 d, SH2 *sh2);
 void *p32x_sh2_get_mem_ptr(u32 a, u32 *mask, SH2 *sh2);
 int p32x_sh2_mem_is_rom(u32 a, SH2 *sh2);
 void p32x_sh2_poll_detect(u32 a, SH2 *sh2, u32 flags, int maxcnt);
-void p32x_sh2_poll_event(SH2 *sh2, u32 flags, u32 m68k_cycles);
+void p32x_sh2_poll_event(u32 a, SH2 *sh2, u32 flags, u32 m68k_cycles);
 int p32x_sh2_memcpy(u32 dst, u32 src, int count, int size, SH2 *sh2);
 
 // 32x/draw.c
