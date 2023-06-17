@@ -160,7 +160,6 @@ set_platform()
     SYSLIBS="-lc -lpspuser -lpspkernel"
     CFLAGS="$CFLAGS -D__PSP__"
     ARCH=mipsel
-    need_zlib="yes"
     ;;
   *)
     fail "unsupported platform: $platform"
