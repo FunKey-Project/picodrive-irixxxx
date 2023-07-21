@@ -124,6 +124,24 @@ void Pico32xStartup(void)
   emu_32x_startup();
 }
 
+void Pico32xShutdown(void)
+{
+  sh2_finish(&msh2);
+  sh2_finish(&ssh2);
+
+  Pico32x.vdp_regs[0] |= P32XS_nRES;
+  Pico32x.vdp_regs[6] |= P32XS_RV;
+
+  rendstatus_old = -1;
+
+  PicoIn.AHW &= ~PAHW_32X;
+  if (PicoIn.AHW & PAHW_MCD)
+    PicoMemSetupCD();
+  else
+    PicoMemSetup();
+  emu_32x_startup();
+}
+
 void p32x_reset_sh2s(void)
 {
   elprintf(EL_32X, "sh2 reset");
@@ -179,10 +197,6 @@ void p32x_reset_sh2s(void)
 
 void Pico32xInit(void)
 {
-  if (msh2.mult_m68k_to_sh2 == 0 || msh2.mult_sh2_to_m68k == 0)
-    Pico32xSetClocks(PICO_MSH2_HZ, 0);
-  if (ssh2.mult_m68k_to_sh2 == 0 || ssh2.mult_sh2_to_m68k == 0)
-    Pico32xSetClocks(0, PICO_MSH2_HZ);
 }
 
 void PicoPower32x(void)
@@ -195,13 +209,12 @@ void PicoPower32x(void)
 
 void PicoUnload32x(void)
 {
-  sh2_finish(&msh2);
-  sh2_finish(&ssh2);
+  if (PicoIn.AHW & PAHW_32X)
+    Pico32xShutdown();
+
   if (Pico32xMem != NULL)
     plat_munmap(Pico32xMem, sizeof(*Pico32xMem));
   Pico32xMem = NULL;
-
-  PicoIn.AHW &= ~PAHW_32X;
 }
 
 void PicoReset32x(void)
@@ -267,8 +280,11 @@ static void p32x_end_blank(void)
   Pico32x.vdp_regs[0x0a/2] &= ~P32XV_VBLK; // get out of vblank
   if ((Pico32x.vdp_regs[0] & P32XV_Mx) != 0) // no forced blanking
     Pico32x.vdp_regs[0x0a/2] &= ~P32XV_PEN; // no palette access
-  if (!(Pico32x.sh2_regs[0] & 0x80))
+  if (!(Pico32x.sh2_regs[0] & 0x80)) {
+    // NB must precede VInt per hw manual, min 4 SH-2 cycles to pass Mars Check
+    Pico32x.hint_counter = -0x18;
     p32x_schedule_hint(NULL, Pico.t.m68c_aim);
+  }
 
   p32x_sh2_poll_event(msh2.poll_addr, &msh2, SH2_STATE_VPOLL, Pico.t.m68c_aim);
   p32x_sh2_poll_event(ssh2.poll_addr, &ssh2, SH2_STATE_VPOLL, Pico.t.m68c_aim);
@@ -283,7 +299,9 @@ void p32x_schedule_hint(SH2 *sh2, unsigned int m68k_cycles)
   if (!(Pico32x.sh2_regs[0] & 0x80) && (Pico.video.status & PVS_VB2))
     return;
 
-  after = (Pico32x.sh2_regs[4 / 2] + 1) * 488;
+  Pico32x.hint_counter += (Pico32x.sh2_regs[4 / 2] + 1) * (int)(488.5*0x10);
+  after = Pico32x.hint_counter >> 4;
+  Pico32x.hint_counter &= 0xf;
   if (sh2 != NULL)
     p32x_event_schedule_sh2(sh2, P32X_EVENT_HINT, after);
   else
@@ -452,7 +470,7 @@ void sync_sh2s_normal(unsigned int m68k_target)
 
   elprintf(EL_32X, "sh2 sync to %u", m68k_target);
 
-  if (!(Pico32x.regs[0] & P32XS_nRES)) {
+  if ((Pico32x.regs[0] & (P32XS_nRES|P32XS_ADEN)) != (P32XS_nRES|P32XS_ADEN)) {
     msh2.m68krcycles_done = ssh2.m68krcycles_done = m68k_target;
     return; // rare
   }
@@ -616,7 +634,8 @@ void Pico32xStateLoaded(int is_early)
     return;
   }
 
-  if (sh2s[0].m68krcycles_done == 0 && sh2s[1].m68krcycles_done == 0)
+  if (CYCLES_GE(sh2s[0].m68krcycles_done - Pico.t.m68c_aim, 500) ||
+      CYCLES_GE(sh2s[1].m68krcycles_done - Pico.t.m68c_aim, 500))
     sh2s[0].m68krcycles_done = sh2s[1].m68krcycles_done = SekCyclesDone();
   p32x_update_irls(NULL, SekCyclesDone());
   p32x_timers_recalc();
@@ -626,6 +645,11 @@ void Pico32xStateLoaded(int is_early)
 
 void Pico32xPrepare(void)
 {
+  if (msh2.mult_m68k_to_sh2 == 0 || msh2.mult_sh2_to_m68k == 0)
+    Pico32xSetClocks(PICO_MSH2_HZ, 0);
+  if (ssh2.mult_m68k_to_sh2 == 0 || ssh2.mult_sh2_to_m68k == 0)
+    Pico32xSetClocks(0, PICO_MSH2_HZ);
+
   sh2_execute_prepare(&msh2, PicoIn.opt & POPT_EN_DRC);
   sh2_execute_prepare(&ssh2, PicoIn.opt & POPT_EN_DRC);
 }

@@ -171,22 +171,19 @@
     subge   r0, r0, #1
     movge   r3, #EG_OFF
     strgeb  r3, [r5,#0x17]       @ state
+    ldrh    r3, [r5,#0x18]       @ tl
+    b       11f
 
 10: @ finish
     ldrb    r2, [r5,#0x30]       @ ssg
-    ldrb    r3, [r5,#0x17]       @ state
-    strh    r0, [r5,#0x1a]       @ volume
-    cmp     r2, #0x0c            @ if ( ssg&0x04 && state > EG_REL )
-    cmpge   r3, #EG_REL+1
     ldrh    r3, [r5,#0x18]       @ tl
-    rsbge   r0, r0, #0x200       @ volume = (0x200-volume) & MAX_ATT
-    movge   r0, r0, lsl #22
-    movge   r0, r0, lsr #22
+    strh    r0, [r5,#0x1a]       @ volume
+    recalc_volume_ssg r0 r2
 
 11:
-#endif
     add     r0, r0, r3           @ volume += tl
     strh    r0, [r5,#0x34]       @ vol_out
+#endif
 
 0: @ EG_OFF
 .endm
@@ -198,10 +195,10 @@
     ldrb    r2, [r5,#0x17]                @ state
     ldrh    r3, [r5,#0x1a]                @ volume
     tst     r0, #0x08                     @ ssg enabled &&
-    beq     9f
+    beq     10f
     cmp     r2, #EG_REL+1                 @   state > EG_REL &&
     cmpge   r3, #0x200                    @   volume >= 0x200?
-    blt     9f
+    blt     10f
 
     tst     r0, #0x01
     beq     1f
@@ -245,24 +242,21 @@
     movgt   r2, #EG_ATT
 8:  strb    r2, [r5,#0x17]                @ state
 9:
+    ldrb    r0, [r5,#0x30]                @ ssg
+    ldrh    r2, [r5,#0x18]                @ tl
+    recalc_volume_ssg r3 r0
+    add     r3, r3, r2                    @ volume += tl
+    strh    r3, [r5,#0x34]                @ vol_out
+10:
 .endm
 
-@ r5=slot, trashes: r0,r2,r3
-.macro recalc_volout
-    ldrb    r2, [r5,#0x30]                @ ssg
-    ldrb    r3, [r5,#0x17]                @ state
-    ldrh    r0, [r5,#0x1a]                @ volume
-
-@    and     r2, r2, #0x0c
-    cmp     r2, #0x0c                     @ if ( ~ssg&0x0c && state > EG_REL )
-    cmpge   r3, #EG_REL+1
-    ldrh    r3, [r5,#0x18]                @ tl
-    rsbge   r0, r0, #0x200                @ volume = (0x200-volume) & MAX_ATT
-    movge   r0, r0, lsl #22
-    movge   r0, r0, lsr #22
-
-    add     r0, r0, r3                    @ volume += tl
-    strh    r0, [r5,#0x34]                @ vol_out
+@ r5=slot
+.macro recalc_volume_ssg vol ssg
+@    and     \ssg, \ssg, #0x0c
+    cmp     \ssg, #0x0c                   @ if (~ssg&0x0c)
+    rsbge   \vol, \vol, #0x200            @ volume = (0x200-volume) & MAX_ATT
+    movge   \vol, \vol, lsl #22
+    movge   \vol, \vol, lsr #22
 .endm
 #endif
 
@@ -699,15 +693,18 @@ ssg_upd_loop:
     @ use lr as a pointer to the slot phases stored in the context
     update_ssg_eg
 #if 0
+    tst     r6, #1
+    addeq   lr, lr, #2*4
+    subne   lr, lr, #4
     subs    r6, r6, #1
-    addne   lr, lr, #4
+    addeq   lr, lr, #4
     addne   r5, r5, #SLOT_STRUCT_SIZE
 #else
-    add     lr, lr, #4*2
+    add     lr, lr, #4
     add     r5, r5, #SLOT_STRUCT_SIZE*2
     update_ssg_eg
     subs    r6, r6, #2
-    subne   lr, lr, #4
+    addne   lr, lr, #4
     subne   r5, r5, #SLOT_STRUCT_SIZE
 #endif
     bne     ssg_upd_loop
@@ -861,8 +858,9 @@ crl_smp_loop_end:
     cmn     r1, r0, asr #13
     subne   r0, r1, #0x80000001
     movne   r0, r0, asr #18
-    tst     r4, r1, lsl #7          @ (sample < 0) && dac?
+    tst     r4, #0x80               @ dac?
     bicne   r0, r0, #0x1f
+    tst     r4, r1, lsl #7          @ (sample < 0) && dac?
     subne   r0, r0, #7<<5
     tst     r12, #1
     beq     ctl_sample_mono

@@ -1041,11 +1041,11 @@ static int get_scanline(int is_from_z80)
   if (is_from_z80) {
     // ugh... compute by dividing cycles since frame start by cycles per line
     // need some fractional resolution here, else there may be an extra line
-    int cycles_line = cycles_68k_to_z80(488 << 8); // cycles per line, as Q8
+    int cycles_line = cycles_68k_to_z80((unsigned)(488.5*256))+1; // cycles per line, Q8
     int cycles_z80 = (z80_cyclesLeft<0 ? Pico.t.z80c_aim:z80_cyclesDone())<<8;
     int cycles = cycles_line * Pico.t.z80_scanline;
     // approximation by multiplying with inverse
-    if (cycles_z80 - cycles >= 2*cycles_line) {
+    if (cycles_z80 - cycles >= 4*cycles_line) {
       // compute 1/cycles_line, storing the result to avoid future dividing
       static int cycles_line_o, cycles_line_i;
       if (cycles_line_o != cycles_line)
@@ -1063,45 +1063,65 @@ static int get_scanline(int is_from_z80)
   return Pico.m.scanline;
 }
 
+#define ym2612_update_status(xcycles) \
+  if (xcycles >= Pico.t.timer_a_next_oflow) \
+    ym2612.OPN.ST.status |= (ym2612.OPN.ST.mode >> 2) & 1; \
+  if (xcycles >= Pico.t.timer_b_next_oflow) \
+    ym2612.OPN.ST.status |= (ym2612.OPN.ST.mode >> 2) & 2
+
 /* probably should not be in this file, but it's near related code here */
 void ym2612_sync_timers(int z80_cycles, int mode_old, int mode_new)
 {
   int xcycles = z80_cycles << 8;
 
-  /* check for overflows */
-  if ((mode_old & 4) && xcycles >= Pico.t.timer_a_next_oflow)
-    ym2612.OPN.ST.status |= 1;
+  // update timer status
+  ym2612_update_status(xcycles);
 
-  if ((mode_old & 8) && xcycles >= Pico.t.timer_b_next_oflow)
-    ym2612.OPN.ST.status |= 2;
-
-  /* update timer a */
+  // update timer a
   if (mode_old & 1)
-    while (xcycles > Pico.t.timer_a_next_oflow)
+    while (xcycles >= Pico.t.timer_a_next_oflow)
       Pico.t.timer_a_next_oflow += Pico.t.timer_a_step;
 
-  if ((mode_old ^ mode_new) & 1) // turning on/off
+  // turning on/off
+  if ((mode_old ^ mode_new) & 1)
   {
     if (mode_old & 1)
       Pico.t.timer_a_next_oflow = TIMER_NO_OFLOW;
-    else
-      Pico.t.timer_a_next_oflow = xcycles + Pico.t.timer_a_step;
+    else {
+      /* The internal tick of the YM2612 takes 144 clock cycles (with clock
+       * being OSC/7), or 67.2 z80 cycles. Timers are run once each tick.
+       * Starting a timer takes place at the next tick, so xcycles needs to be
+       * rounded up to that: t = next tick# = (xcycles / TICK_ZCYCLES) + 1
+       */
+      unsigned t = ((xcycles * (((1<<20)/TIMER_A_TICK_ZCYCLES)+1))>>20) + 1;
+      Pico.t.timer_a_next_oflow = t*TIMER_A_TICK_ZCYCLES + Pico.t.timer_a_step;
+    }
   }
+
   if (mode_new & 1)
     elprintf(EL_YMTIMER, "timer a upd to %i @ %i", Pico.t.timer_a_next_oflow>>8, z80_cycles);
 
-  /* update timer b */
+  // update timer b
   if (mode_old & 2)
-    while (xcycles > Pico.t.timer_b_next_oflow)
+    while (xcycles >= Pico.t.timer_b_next_oflow)
       Pico.t.timer_b_next_oflow += Pico.t.timer_b_step;
 
+  // turning on/off
   if ((mode_old ^ mode_new) & 2)
   {
     if (mode_old & 2)
       Pico.t.timer_b_next_oflow = TIMER_NO_OFLOW;
-    else
-      Pico.t.timer_b_next_oflow = xcycles + Pico.t.timer_b_step;
+    else {
+      /* timer b has a divider of 16 which runs in its own counter. It is not
+       * reset by loading timer b. The first run of timer b after loading is
+       * therefore shorter by up to 15 ticks.
+       */
+      unsigned t = ((xcycles * (((1<<20)/TIMER_A_TICK_ZCYCLES)+1))>>20) + 1;
+      int step = Pico.t.timer_b_step - TIMER_A_TICK_ZCYCLES*(t&15);
+      Pico.t.timer_b_next_oflow = t*TIMER_A_TICK_ZCYCLES + step;
+    }
   }
+
   if (mode_new & 2)
     elprintf(EL_YMTIMER, "timer b upd to %i @ %i", Pico.t.timer_b_next_oflow>>8, z80_cycles);
 }
@@ -1136,31 +1156,26 @@ static int ym2612_write_local(u32 a, u32 d, int is_from_z80)
                                      : ((ym2612.OPN.ST.TA & 0x3fc)|(d&3));
           if (ym2612.OPN.ST.TA != TAnew)
           {
+            int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
+            ym2612_sync_timers(cycles, ym2612.OPN.ST.mode, ym2612.OPN.ST.mode);
             //elprintf(EL_STATUS, "timer a set %i", TAnew);
             ym2612.OPN.ST.TA = TAnew;
             //ym2612.OPN.ST.TAC = (1024-TAnew)*18;
             //ym2612.OPN.ST.TAT = 0;
             Pico.t.timer_a_step = TIMER_A_TICK_ZCYCLES * (1024 - TAnew);
-            if (ym2612.OPN.ST.mode & 1) {
-              // this is not right, should really be done on overflow only
-              int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
-              Pico.t.timer_a_next_oflow = (cycles << 8) + Pico.t.timer_a_step;
-            }
             elprintf(EL_YMTIMER, "timer a set to %i, %i", 1024 - TAnew, Pico.t.timer_a_next_oflow>>8);
           }
           return 0;
         }
         case 0x26: // timer B
           if (ym2612.OPN.ST.TB != d) {
+            int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
+            ym2612_sync_timers(cycles, ym2612.OPN.ST.mode, ym2612.OPN.ST.mode);
             //elprintf(EL_STATUS, "timer b set %i", d);
             ym2612.OPN.ST.TB = d;
             //ym2612.OPN.ST.TBC = (256-d) * 288;
             //ym2612.OPN.ST.TBT  = 0;
-            Pico.t.timer_b_step = TIMER_B_TICK_ZCYCLES * (256 - d); // 262800
-            if (ym2612.OPN.ST.mode & 2) {
-              int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
-              Pico.t.timer_b_next_oflow = (cycles << 8) + Pico.t.timer_b_step;
-            }
+            Pico.t.timer_b_step = TIMER_B_TICK_ZCYCLES * (256 - d);
             elprintf(EL_YMTIMER, "timer b set to %i, %i", 256 - d, Pico.t.timer_b_next_oflow>>8);
           }
           return 0;
@@ -1168,10 +1183,10 @@ static int ym2612_write_local(u32 a, u32 d, int is_from_z80)
           int old_mode = ym2612.OPN.ST.mode;
           int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
 
-          ym2612.OPN.ST.mode = d;
-
           elprintf(EL_YMTIMER, "st mode %02x", d);
           ym2612_sync_timers(cycles, old_mode, d);
+
+          ym2612.OPN.ST.mode = d;
 
           /* reset Timer a flag */
           if (d & 0x10)
@@ -1218,17 +1233,11 @@ static int ym2612_write_local(u32 a, u32 d, int is_from_z80)
 }
 
 
-#define ym2612_read_local() \
-  if (xcycles >= Pico.t.timer_a_next_oflow) \
-    ym2612.OPN.ST.status |= (ym2612.OPN.ST.mode >> 2) & 1; \
-  if (xcycles >= Pico.t.timer_b_next_oflow) \
-    ym2612.OPN.ST.status |= (ym2612.OPN.ST.mode >> 2) & 2
-
 static u32 ym2612_read_local_z80(void)
 {
   int xcycles = z80_cyclesDone() << 8;
 
-  ym2612_read_local();
+  ym2612_update_status(xcycles);
 
   elprintf(EL_YMTIMER, "timer z80 read %i, sched %i, %i @ %i|%i",
     ym2612.OPN.ST.status, Pico.t.timer_a_next_oflow >> 8,
@@ -1240,7 +1249,7 @@ static u32 ym2612_read_local_68k(void)
 {
   int xcycles = z80_cycles_from_68k() << 8;
 
-  ym2612_read_local();
+  ym2612_update_status(xcycles);
 
   elprintf(EL_YMTIMER, "timer 68k read %i, sched %i, %i @ %i|%i",
     ym2612.OPN.ST.status, Pico.t.timer_a_next_oflow >> 8,
@@ -1334,12 +1343,22 @@ void PicoWrite16_32x(u32 a, u32 d) {}
 // -----------------------------------------------------------------
 //                        z80 memhandlers
 
+static void access_68k_bus(int delay) // bus delay as Q8
+{
+  // 68k bus access delay for z80. The fractional part needs to be accumulated
+  // until an additional cycle is full. That is then added to the integer part.
+  Pico.t.z80_busdelay = (delay&0xff) + (Pico.t.z80_busdelay&0xff); // accumulate
+  z80_subCLeft((delay>>8) + (Pico.t.z80_busdelay>>8));
+  // don't use SekCyclesBurn() here since the Z80 doesn't run in cycle lock to
+  // the 68K. Count the stolen cycles to be accounted later in the 68k CPU runs
+  Pico.t.z80_buscycles += 7;
+}
+
 static unsigned char z80_md_vdp_read(unsigned short a)
 {
   if ((a & 0xff00) == 0x7f00) {
-    static int f; f = (f&0xff) + 0x8c; // 0.6
-    z80_subCLeft(2+(f>>8)); // 3.3 per kabuto, but notaz' test implies 2.6 ?!?
-    Pico.t.z80_buscycles += 7;
+    // 68k bus access delay=3.3 per kabuto, for notaz picotest 2.42<delay<2.57?
+    access_68k_bus(0x280); // Q8, picotest: 0x26d(>2.42) - 0x292(<2.57)
 
     switch (a & 0x0d)
     {
@@ -1348,7 +1367,7 @@ static unsigned char z80_md_vdp_read(unsigned short a)
       case 0x04: return PicoVideoRead8CtlH(1);
       case 0x05: return PicoVideoRead8CtlL(1);
       case 0x08:
-      case 0x0c: return get_scanline(1); // FIXME: make it proper
+      case 0x0c: return PicoVideoGetV(get_scanline(1), 1);
       case 0x09:
       case 0x0d: return Pico.m.rotate++;
     }
@@ -1363,12 +1382,8 @@ static unsigned char z80_md_bank_read(unsigned short a)
   unsigned int addr68k;
   unsigned char ret;
 
-  // account for 68K bus access on both CPUs.
-  static int f; f = (f&0xff) + 0x4c; // 0.3
-  z80_subCLeft(3+(f>>8)); // 3.3 per kabuto
-  // don't use SekCyclesBurn(7) here since the Z80 doesn't run in cycle lock to
-  // the 68K. Count the stolen cycles to be accounted later in the 68k CPU runs
-  Pico.t.z80_buscycles += 7;
+  // 68k bus access delay=3.3 per kabuto, but for notaz picotest 3.02<delay<3.32
+  access_68k_bus(0x340); // Q8, picotest: 0x306(>3.02)-0x351(<3.32)
 
   addr68k = Pico.m.z80_bank68k << 15;
   addr68k |= a & 0x7fff;
@@ -1409,12 +1424,8 @@ static void z80_md_bank_write(unsigned int a, unsigned char data)
 {
   unsigned int addr68k;
 
-  // account for 68K bus access on both CPUs.
-  static int f; f = (f&0xff) + 0x4c; // 0.3
-  z80_subCLeft(3+(f>>8)); // 3.3 per kabuto
-  // don't use SekCyclesBurn(7) here since the Z80 doesn't run in cycle lock to
-  // the 68K. Count the stolen cycles to be accounted later in the 68K CPU runs
-  Pico.t.z80_buscycles += 7;
+  // 68k bus access delay=3.3 per kabuto, but for notaz picotest 3.02<delay<3.32
+  access_68k_bus(0x340); // Q8, picotest: 0x306(>3.02)-0x351(<3.32)
 
   addr68k = Pico.m.z80_bank68k << 15;
   addr68k += a & 0x7fff;
