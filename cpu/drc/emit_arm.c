@@ -437,7 +437,7 @@ static u32 literal_pool[MAX_HOST_LITERALS];
 static u32 *literal_insn[MAX_HOST_LITERALS];
 static int literal_pindex, literal_iindex;
 
-static int emith_pool_literal(u32 imm, int *offs)
+static inline int emith_pool_literal(u32 imm, int *offs)
 {
 	int idx = literal_pindex - 8; // max look behind in pool
 	// see if one of the last literals was the same (or close enough)
@@ -479,7 +479,7 @@ static void emith_op_imm2(int cond, int s, int op, int rd, int rn, unsigned int 
 			}
 			// count insns needed for mov/orr #imm
 #ifdef HAVE_ARMV7
-			for (i = 2, u = v; i > 0; i--, u >>= 8)
+			for (i = 2, u = v; i > 0 && u; i--, u >>= 8)
 				while (u > 0xff && !(u & 3))
 					u >>= 2;
 			if (u) { // 3+ insns needed...
@@ -492,7 +492,7 @@ static void emith_op_imm2(int cond, int s, int op, int rd, int rn, unsigned int 
 				return;
 			}
 #else
-			for (i = 2, u = v; i > 0; i--, u >>= 8)
+			for (i = 2, u = v; i > 0 && u; i--, u >>= 8)
 				while (u > 0xff && !(u & 3))
 					u >>= 2;
 			if (u) { // 3+ insns needed...
@@ -559,6 +559,10 @@ static void emith_op_imm2(int cond, int s, int op, int rd, int rn, unsigned int 
 		rn = rd;
 
 		v >>= 8, ror2 -= 8/2;
+		if (v && s) {
+			elprintf(EL_STATUS|EL_SVP|EL_ANOMALY, "op+s %x value too big", op);
+			exit(1);
+		}
 	} while (v);
 }
 
@@ -617,7 +621,10 @@ static void emith_pool_commit(int jumpover)
 	if (sz == 0)
 		return;
 	// need branch over pool if not at block end
-	if (jumpover) {
+	if (jumpover < 0 && sz == sizeof(u32)) {
+		// hack for SVP drc (patch logic detects distance 4)
+		sz += sizeof(u32);
+	} else if (jumpover) {
 		pool += sizeof(u32);
 		emith_xbranch(A_COND_AL, (u8 *)pool + sz, 0);
 	}
@@ -1188,8 +1195,9 @@ static inline void emith_pool_adjust(int tcache_offs, int move_offs)
 #define emith_jump_patch_size() 4
 
 #define emith_jump_at(ptr, target) do { \
+	u32 *ptr_ = (u32 *)ptr; \
 	u32 val_ = (u32 *)(target) - (u32 *)(ptr) - 2; \
-	EOP_C_B_PTR(ptr, A_COND_AL, 0, val_ & 0xffffff); \
+	EOP_C_B_PTR(ptr_, A_COND_AL, 0, val_ & 0xffffff); \
 } while (0)
 #define emith_jump_at_size() 4
 
@@ -1216,7 +1224,7 @@ static inline void emith_pool_adjust(int tcache_offs, int move_offs)
         EOP_C_BX(A_COND_AL, r); \
 } while (0)
 
-#define emith_call_ctx(offs) do { \
+#define emith_abicall_ctx(offs) do { \
 	emith_move_r_r(LR, PC); \
 	emith_jump_ctx(offs); \
 } while (0)
@@ -1260,6 +1268,9 @@ static inline void emith_pool_adjust(int tcache_offs, int move_offs)
 #define host_instructions_updated(base, end, force) \
 	do { if (force) emith_update_add(base, end); } while (0)
 
+#define host_call(addr, args) \
+	addr
+
 #define host_arg2reg(rd, arg) \
 	rd = arg
 
@@ -1288,7 +1299,7 @@ static inline void emith_pool_adjust(int tcache_offs, int move_offs)
 	emith_lsr(func, a, SH2_WRITE_SHIFT); \
 	EOP_LDR_REG_LSL(A_COND_AL,func,tab,func,2); \
 	emith_move_r_r(2, CONTEXT_REG); /* arg2 */ \
-	emith_jump_reg(func); \
+	emith_abijump_reg(func); \
 } while (0)
 
 #define emith_sh2_dtbf_loop() do { \

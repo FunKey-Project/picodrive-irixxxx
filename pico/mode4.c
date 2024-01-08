@@ -3,14 +3,11 @@
  * (C) notaz, 2009-2010
  * (C) kub, 2021
  *
- * currently supports VDP mode 4 (SMS and GG) and mode 2+0 (TMS)
+ * currently supports VDP mode 4 (SMS and GG) and mode 3-0 (TMS)
+ * modes numbered after the bit numbers used in Sega and TI documentation
  *
  * This work is licensed under the terms of MAME license.
  * See COPYING file in the top-level directory.
- */
-/*
- * TODO:
- * - other TMS9918 modes?
  */
 #include "pico_int.h"
 #include <platform/common/upscale.h>
@@ -55,8 +52,8 @@ static int CollisionDetect(u8 *mb, u16 sx, unsigned int pack, int zoomed)
   return col;
 }
 
-/* Mode 4 */
-/*========*/
+/* Mode 4 - SMS Graphics */
+/*=======================*/
 
 static void TileBGM4(u16 sx, int pal)
 {
@@ -157,16 +154,15 @@ static void ParseSpritesM4(int scanline)
 {
   struct PicoVideo *pv = &Pico.video;
   u8 *sat;
-  int xoff = 8; // relative to HighCol, which is (screen - 8)
+  int xoff = line_offset;
   int sprite_base, addr_mask;
   int zoomed = pv->reg[1] & 0x1; // zoomed sprites, e.g. Earthworm Jim
   unsigned int pack;
   int i, s, h, m;
 
   if (pv->reg[0] & 8)
-    xoff = 0;
-  xoff += line_offset;
-  if ((Pico.m.hardware & 0x3) == 0x3)
+    xoff -= 8;  // sprite shift
+  if (Pico.m.hardware & PMS_HW_LCD)
     xoff -= 48; // GG LCD, adjust to center 160 px
 
   sat = (u8 *)PicoMem.vram + ((pv->reg[5] & 0x7e) << 7);
@@ -207,6 +203,9 @@ static void ParseSpritesM4(int scanline)
         // make sprite pixel map by merging the 4 bitplanes
         pack = ((pack | (pack>>16)) | ((pack | (pack>>16))>>8)) & 0xff;
         if (!m) m = CollisionDetect(sprites_map, sprites_x[s], pack, zoomed);
+        // no collision detection in 1st column if it's masked
+        if (pv->reg[0] & 0x20)
+          sprites_map[1] = 0;
       }
       s++;
     }
@@ -238,7 +237,7 @@ static void DrawStripM4(const u16 *nametab, int cells_dx, int tilex_ty)
   int addr = 0, pal = 0;
 
   // Draw tiles across screen:
-  for (; cells_dx > 0; cells_dx += 8, tilex_ty++, cells_dx -= 0x10000)
+  for (; cells_dx >= 0; cells_dx += 8, tilex_ty++, cells_dx -= 0x10000)
   {
     unsigned int pack;
     unsigned code;
@@ -293,39 +292,37 @@ static void DrawDisplayM4(int scanline)
   if (scanline < 16 && (pv->reg[0] & 0x40))
     dx = 0; // hscroll disabled for top 2 rows (e.g. Fantasy Zone II)
 
-  tilex = ((-dx >> 3) + cellskip) & 0x1f;
+  tilex = (32 - (dx >> 3) + cellskip) & 0x1f;
   ty = (line & 7) << 1; // Y-Offset into tile
-  cells = maxcells - cellskip;
+  cells = maxcells - cellskip - 1;
 
-  dx = ((dx - 1) & 7) + 1;
-  if (dx != 8)
-    cells++; // have hscroll, need to draw 1 cell more
+  dx = (dx & 7);
   dx += cellskip << 3;
   dx += line_offset;
 
   // tiles
   if (!(pv->debug_p & PVD_KILL_B)) {
-    if ((Pico.m.hardware & 0x3) == 0x3) {
-      // on GG render only the center 160 px
-      DrawStripM4(nametab , dx | ((cells-12)<< 16),(tilex+6) | (ty  << 16));
+    if (Pico.m.hardware & PMS_HW_LCD) {
+      // on GG render only the center 160 px, but mind hscroll
+      DrawStripM4(nametab , (dx-8) | ((cells-11)<< 16),(tilex+5) | (ty  << 16));
     } else if (pv->reg[0] & 0x80) {
       // vscroll disabled for rightmost 8 columns (e.g. Gauntlet)
       int dx2 = dx + (cells-8)*8, tilex2 = tilex + (cells-8), ty2 = scanline&7;
-      DrawStripM4(nametab,  dx | ((cells-8) << 16), tilex  | (ty  << 16));
-      DrawStripM4(nametab2, dx2 |       (8  << 16), tilex2 | (ty2 << 17));
+      DrawStripM4(nametab,   dx    | ((cells-8) << 16), tilex    | (ty  << 16));
+      DrawStripM4(nametab2,  dx2   |        (8  << 16), tilex2   | (ty2 << 17));
     } else
-      DrawStripM4(nametab , dx | ( cells    << 16), tilex  | (ty  << 16));
+      DrawStripM4(nametab ,  dx    | ( cells    << 16), tilex    | (ty  << 16));
   }
 
   // sprites
   if (!(pv->debug_p & PVD_KILL_S_LO))
     DrawSpritesM4();
 
-  if ((pv->reg[0] & 0x20) && (Pico.m.hardware & 0x3) != 0x3) {
+  if ((pv->reg[0] & 0x20) && !(Pico.m.hardware & PMS_HW_LCD)) {
     // first column masked with background, caculate offset to start of line
-    dx = (dx&~0x1f) / 4;
+    dx = line_offset / 4;
     ty = ((pv->reg[7]&0x0f)|0x10) * 0x01010101;
-    ((u32 *)Pico.est.HighCol)[dx+2] = ((u32 *)Pico.est.HighCol)[dx+3] = ty;
+    ((u32 *)Pico.est.HighCol)[dx] = ((u32 *)Pico.est.HighCol)[dx+1] = ty;
   }
 }
 
@@ -333,14 +330,44 @@ static void DrawDisplayM4(int scanline)
 /* TMS Modes */
 /*===========*/
 
-/* Background, Graphics modes */
+/* Background */
 
 #define TMS_PIXELBG(x,p) \
   t = (pack>>(7-p)) & 0x01; \
   t = (pal >> (t << 2)) & 0x0f; \
-  pd[x] = t;
+  if (t) \
+    pd[x] = t;
 
-static void TileNormBgGr(u16 sx, unsigned int pack, int pal)
+static void TileNormBgM1(u16 sx, unsigned int pack, int pal) /* Text */
+{
+  u8 *pd = Pico.est.HighCol + sx;
+  unsigned int t;
+
+  TMS_PIXELBG(0, 0)
+  TMS_PIXELBG(1, 1)
+  TMS_PIXELBG(2, 2)
+  TMS_PIXELBG(3, 3)
+  TMS_PIXELBG(4, 4)
+  TMS_PIXELBG(5, 5)
+}
+
+static void TileNormBgM2(u16 sx, int pal) /* Multicolor */
+{
+  u8 *pd = Pico.est.HighCol + sx;
+  unsigned int pack = 0xf0;
+  unsigned int t;
+
+  TMS_PIXELBG(0, 0)
+  TMS_PIXELBG(1, 1)
+  TMS_PIXELBG(2, 2)
+  TMS_PIXELBG(3, 3)
+  TMS_PIXELBG(4, 4)
+  TMS_PIXELBG(5, 5)
+  TMS_PIXELBG(6, 6)
+  TMS_PIXELBG(7, 7)
+}
+
+static void TileNormBgMg(u16 sx, unsigned int pack, int pal) /* Graphics */
 {
   u8 *pd = Pico.est.HighCol + sx;
   unsigned int t;
@@ -405,12 +432,12 @@ static void ParseSpritesTMS(int scanline)
   struct PicoVideo *pv = &Pico.video;
   unsigned int pack;
   u8 *sat;
-  int xoff = 8; // relative to HighCol, which is (screen - 8)
+  int xoff;
   int sprite_base, addr_mask;
   int zoomed = pv->reg[1] & 0x1; // zoomed sprites
   int i, s, h, m;
 
-  xoff += line_offset;
+  xoff = line_offset;
 
   sat = (u8 *)PicoMem.vramb + ((pv->reg[5] & 0x7e) << 7);
   if (pv->reg[1] & 2) {
@@ -494,14 +521,112 @@ static void DrawSpritesTMS(void)
   }
 }
 
-/* Mode 2 */
-/*========*/
+
+/* Mode 1 - Text */
+/*===============*/
 
 /* Draw the background into a scanline; cells, dx, tilex, ty merged to reduce registers */
-static void DrawStripM2(const u8 *nametab, const u8 *coltab, const u8 *pattab, int cells_dx, int tilex_ty)
+static void DrawStripM1(const u8 *nametab, const u8 *pattab, int cells_dx, int tilex_ty)
 {
   // Draw tiles across screen:
-  for (; cells_dx > 0; cells_dx += 8, tilex_ty++, cells_dx -= 0x10000)
+  for (; cells_dx >= 0; cells_dx += 6, tilex_ty++, cells_dx -= 0x10000)
+  {
+    unsigned int pack, pal;
+    unsigned code;
+
+    code = nametab[tilex_ty & 0x3f];
+    pal  = Pico.video.reg[7];
+    pack = pattab[code << 3];
+    TileNormBgM1(cells_dx, pack, pal);
+  }
+}
+
+/* Draw a scanline */
+static void DrawDisplayM1(int scanline)
+{
+  struct PicoVideo *pv = &Pico.video;
+  u8 *nametab, *pattab;
+  int tilex, dx, cells;
+  int cellskip = 0; // XXX
+  int maxcells = 40;
+  unsigned mask = pv->reg[0] & 0x2 ? 0x2000 : 0x3800; // M3: 2 bits table select
+
+  // name, color, pattern table:
+  nametab = PicoMem.vramb + ((pv->reg[2]<<10) & 0x3c00);
+  pattab  = PicoMem.vramb + ((pv->reg[4]<<11) & mask);
+  pattab += ((scanline>>6) << 11) & ~mask; // table select bits for M3
+
+  nametab += ((scanline>>3) * maxcells);
+  pattab  += (scanline & 0x7);
+
+  tilex = cellskip & 0x1f;
+  cells = maxcells - cellskip - 1;
+  dx = 8 + (cellskip << 3) + line_offset;
+
+  // tiles
+  if (!(pv->debug_p & PVD_KILL_B))
+    DrawStripM1(nametab, pattab, dx | (cells << 16), tilex | (scanline << 16));
+}
+
+
+/* Mode 2 - Multicolor */
+/*=====================*/
+
+/* Draw the background into a scanline; cells, dx, tilex, ty merged to reduce registers */
+static void DrawStripM2(const u8 *nametab, const u8 *pattab, int cells_dx, int tilex_ty)
+{
+  // Draw tiles across screen:
+  for (; cells_dx >= 0; cells_dx += 8, tilex_ty++, cells_dx -= 0x10000)
+  {
+    unsigned int pal;
+    unsigned code;
+
+    code = nametab[tilex_ty & 0x1f];
+    pal  = pattab[code << 3];
+    TileNormBgM2(cells_dx, pal);
+  }
+}
+
+/* Draw a scanline */
+static void DrawDisplayM2(int scanline)
+{
+  struct PicoVideo *pv = &Pico.video;
+  u8 *nametab, *pattab;
+  int tilex, dx, cells;
+  int cellskip = 0; // XXX
+  int maxcells = 32;
+  unsigned mask = pv->reg[0] & 0x2 ? 0x2000 : 0x3800; // M3: 2 bits table select
+
+  // name, color, pattern table:
+  nametab = PicoMem.vramb + ((pv->reg[2]<<10) & 0x3c00);
+  pattab  = PicoMem.vramb + ((pv->reg[4]<<11) & mask);
+  pattab += ((scanline>>6) << 11) & ~mask; // table select bits for M3
+
+  nametab += (scanline>>3) << 5;
+  pattab  += (scanline>>2) & 0x7;
+
+  tilex = cellskip & 0x1f;
+  cells = maxcells - cellskip - 1;
+  dx = (cellskip << 3) + line_offset;
+
+  // tiles
+  if (!(pv->debug_p & PVD_KILL_B))
+    DrawStripM2(nametab, pattab, dx | (cells << 16), tilex | (scanline << 16));
+
+  // sprites
+  if (!(pv->debug_p & PVD_KILL_S_LO))
+    DrawSpritesTMS();
+}
+
+
+/* Mode 3 - Graphics II */
+/*======================*/
+
+/* Draw the background into a scanline; cells, dx, tilex, ty merged to reduce registers */
+static void DrawStripM3(const u8 *nametab, const u8 *coltab, const u8 *pattab, int cells_dx, int tilex_ty)
+{
+  // Draw tiles across screen:
+  for (; cells_dx >= 0; cells_dx += 8, tilex_ty++, cells_dx -= 0x10000)
   {
     unsigned int pack, pal;
     unsigned code;
@@ -509,12 +634,12 @@ static void DrawStripM2(const u8 *nametab, const u8 *coltab, const u8 *pattab, i
     code = nametab[tilex_ty & 0x1f] << 3;
     pal  = coltab[code];
     pack = pattab[code];
-    TileNormBgGr(cells_dx, pack, pal);
+    TileNormBgMg(cells_dx, pack, pal);
   }
 }
 
 /* Draw a scanline */
-static void DrawDisplayM2(int scanline)
+static void DrawDisplayM3(int scanline)
 {
   struct PicoVideo *pv = &Pico.video;
   u8 *nametab, *coltab, *pattab;
@@ -532,26 +657,27 @@ static void DrawDisplayM2(int scanline)
   pattab  += ((scanline>>6) <<11) + (scanline & 0x7);
 
   tilex = cellskip & 0x1f;
-  cells = maxcells - cellskip;
-  dx = (cellskip << 3) + line_offset + 8;
+  cells = maxcells - cellskip - 1;
+  dx = (cellskip << 3) + line_offset;
 
   // tiles
   if (!(pv->debug_p & PVD_KILL_B))
-    DrawStripM2(nametab, coltab, pattab, dx | (cells << 16), tilex | (scanline << 16));
+    DrawStripM3(nametab, coltab, pattab, dx | (cells << 16), tilex | (scanline << 16));
 
   // sprites
   if (!(pv->debug_p & PVD_KILL_S_LO))
     DrawSpritesTMS();
 }
 
-/* Mode 0 */
-/*========*/
+
+/* Mode 0 - Graphics I */
+/*=====================*/
 
 /* Draw the background into a scanline; cells, dx, tilex, ty merged to reduce registers */
 static void DrawStripM0(const u8 *nametab, const u8 *coltab, const u8 *pattab, int cells_dx, int tilex_ty)
 {
   // Draw tiles across screen:
-  for (; cells_dx > 0; cells_dx += 8, tilex_ty++, cells_dx -= 0x10000)
+  for (; cells_dx >= 0; cells_dx += 8, tilex_ty++, cells_dx -= 0x10000)
   {
     unsigned int pack, pal;
     unsigned code;
@@ -559,7 +685,7 @@ static void DrawStripM0(const u8 *nametab, const u8 *coltab, const u8 *pattab, i
     code = nametab[tilex_ty & 0x1f];
     pal  = coltab[code >> 3];
     pack = pattab[code << 3];
-    TileNormBgGr(cells_dx, pack, pal);
+    TileNormBgMg(cells_dx, pack, pal);
   }
 }
 
@@ -581,8 +707,8 @@ static void DrawDisplayM0(int scanline)
   pattab  += (scanline & 0x7);
 
   tilex = cellskip & 0x1f;
-  cells = maxcells - cellskip;
-  dx = (cellskip << 3) + line_offset + 8;
+  cells = maxcells - cellskip - 1;
+  dx = (cellskip << 3) + line_offset;
 
   // tiles
   if (!(pv->debug_p & PVD_KILL_B))
@@ -603,6 +729,7 @@ static void FinalizeLine8bitSMS(int line);
 void PicoFrameStartSMS(void)
 {
   int lines = 192, columns = 256, loffs, coffs;
+
   skip_next_line = 0;
   loffs = screen_offset = 24; // 192 lines is really 224 with top/bottom bars
   Pico.est.rendstatus = PDRAW_32_COLS;
@@ -614,36 +741,51 @@ void PicoFrameStartSMS(void)
   }
 
   // Copy LCD enable flag for easier handling
-  Pico.m.hardware &= ~0x2;
-  if (PicoIn.opt & POPT_EN_GG_LCD)
-    Pico.m.hardware |= 0x2;
+  Pico.m.hardware &= ~PMS_HW_LCD;
+  if ((PicoIn.opt & POPT_EN_GG_LCD) && (PicoIn.AHW & PAHW_GG)) {
+    Pico.m.hardware |= PMS_HW_LCD;
 
-  if ((Pico.m.hardware & 0x3) == 0x3) {
     // GG LCD always has 160x144 regardless of settings
     screen_offset = 24; // nonetheless the vdp timing has 224 lines
     loffs = 48;
     lines = 144;
     columns = 160;
-  } else switch (mode) {
-  // SMS2 only 224/240 line modes, e.g. Micro Machines
-  case 0x06|0x08:
-      loffs = screen_offset = 0;
-      lines = 240;
-      break;
-  case 0x06|0x10:
-      loffs = screen_offset = 8;
-      lines = 224;
-      break;
+  } else {
+    if ((mode & 4) && (Pico.video.reg[0] & 0x20)) {
+      // SMS mode 4 with 1st column blanked
+      Pico.est.rendstatus |= PDRAW_SMS_BLANK_1;
+      columns = 248;
+    }
+
+    switch (mode) {
+    // SMS2 only 224/240 line modes, e.g. Micro Machines
+    case 0x06|0x08:
+        Pico.est.rendstatus |= PDRAW_30_ROWS;
+        loffs = screen_offset = 0;
+        lines = 240;
+        break;
+    case 0x06|0x10:
+        loffs = screen_offset = 8;
+        lines = 224;
+        break;
+    }
   }
-  if (PicoIn.opt & POPT_EN_SOFTSCALE) {
+
+  line_offset = 8; // FinalizeLine requires HighCol+8
+  // ugh... nonetheless has offset in 8-bit fast mode if 1st col blanked!
+  coffs = (FinalizeLineSMS == NULL && columns == 248 ? 8 : 0);
+  if (FinalizeLineSMS != NULL && (PicoIn.opt & POPT_EN_SOFTSCALE)) {
+    // softscaling always generates 320px, but no scaling in 8bit fast
+    Pico.est.rendstatus |= PDRAW_SOFTSCALE;
     coffs = 0;
     columns = 320;
-  } else
-    coffs = PicoIn.opt & POPT_DIS_32C_BORDER ? 0:(320-columns)/2;
-  line_offset = (FinalizeLineSMS == NULL ? coffs : 0);
-
-  if (FinalizeLineSMS == FinalizeLineRGB555SMS)
-    line_offset = 0 /* done in FinalizeLine */;
+  } else if (!(PicoIn.opt & POPT_DIS_32C_BORDER)) {
+    Pico.est.rendstatus |= PDRAW_BORDER_32;
+    line_offset -= coffs;
+    coffs = (320-columns) / 2;
+    if (FinalizeLineSMS == NULL)
+      line_offset += coffs; // ... else centering done in FinalizeLine
+  }
 
   if (Pico.est.rendstatus != rendstatus_old || lines != rendlines) {
     emu_video_mode_change(loffs, lines, coffs, columns);
@@ -674,7 +816,7 @@ void PicoLineSMS(int line)
   unsigned bgcolor;
 
   // GG LCD, render only visible part of screen
-  if ((Pico.m.hardware & 0x3) == 0x3 && (line < 24 || line >= 24+144))
+  if ((Pico.m.hardware & PMS_HW_LCD) && (line < 24 || line >= 24+144))
     goto norender;
 
   if (PicoScanBegin != NULL && skip == 0)
@@ -689,8 +831,10 @@ void PicoLineSMS(int line)
   bgcolor = (Pico.video.reg[7] & 0x0f) | ((Pico.video.reg[0] & 0x04) << 2);
   BackFill(bgcolor, 0, &Pico.est); // bgcolor is from 2nd palette in mode 4
   if (Pico.video.reg[1] & 0x40) {
-    if      (Pico.video.reg[0] & 0x04) DrawDisplayM4(line);
-    else if (Pico.video.reg[0] & 0x02) DrawDisplayM2(line);
+    if      (Pico.video.reg[0] & 0x04) DrawDisplayM4(line); // also M4+M3
+    else if (Pico.video.reg[1] & 0x08) DrawDisplayM2(line); // also M2+M3
+    else if (Pico.video.reg[1] & 0x10) DrawDisplayM1(line); // also M1+M3
+    else if (Pico.video.reg[0] & 0x02) DrawDisplayM3(line);
     else                               DrawDisplayM0(line);
   }
 
@@ -705,14 +849,19 @@ norender:
   Pico.est.DrawLineDest = (char *)Pico.est.DrawLineDest + DrawLineDestIncrement;
 }
 
-/* Fixed palette for TMS9918 modes */
-static u16 tmspal[32] = {
+/* Palette for TMS9918 mode, see https://www.smspower.org/Development/Palette */
+// RGB values: #000000 #000000 #21c842 #5edc78 #5455ed #7d76fc #d4524d #42ebf5
+//             #fc5554 #ff7978 #d4c154 #e6ce80 #21b03b #c95bba #cccccc #ffffff
+static u16 tmspal[] = {
   // SMS palette
-  0x0000, 0x0000, 0x00a0, 0x00f0, 0x0500, 0x0f00, 0x0005, 0x0ff0,
-  0x000a, 0x000f, 0x0055, 0x00ff, 0x0050, 0x0f0f, 0x0555, 0x0fff,
+  0x0000, 0x0000, 0x00a0, 0x00f0, 0x0a00, 0x0f00, 0x0005, 0x0ff0,
+  0x000a, 0x000f, 0x00aa, 0x00ff, 0x0050, 0x0f0f, 0x0aaa, 0x0fff,
   // TMS palette
-  0x0000, 0x0000, 0x04c2, 0x07d5, 0x0e55, 0x0f77, 0x045d, 0x0fe4,
-  0x055f, 0x077f, 0x05cd, 0x08ce, 0x03b2, 0x0b5c, 0x0ccc, 0x0fff,
+  0x0000, 0x0000, 0x04c2, 0x07d6, 0x0e55, 0x0f77, 0x055c, 0x0ee4,
+  0x055f, 0x077f, 0x05bc, 0x08ce, 0x03a2, 0x0b5c, 0x0ccc, 0x0fff,
+  // SMS palette, closer to the TMS one
+  0x0000, 0x0000, 0x05f0, 0x05f5, 0x0a50, 0x0f55, 0x055a, 0x0ff0,
+  0x055f, 0x0aaf, 0x05aa, 0x05af, 0x00a0, 0x0f5f, 0x0aaa, 0x0fff,
 };
 
 void PicoDoHighPal555SMS(void)
@@ -723,18 +872,18 @@ void PicoDoHighPal555SMS(void)
   unsigned int t;
   int i, j;
  
-  if (FinalizeLineSMS != FinalizeLine8bitSMS || Pico.m.dirtyPal == 2)
+  if (FinalizeLineSMS == FinalizeLineRGB555SMS || Pico.m.dirtyPal == 2)
     Pico.m.dirtyPal = 0;
 
-  // use hardware palette for 16bit accurate mode
-  if (FinalizeLineSMS == FinalizeLineRGB555SMS)
+  // use hardware palette if not in 8bit accurate mode
+  if (FinalizeLineSMS != FinalizeLine8bitSMS)
     spal = (void *)PicoMem.cram;
 
   /* SMS 6 bit cram data was already converted to MD/GG format by vdp write,
    * hence GG/SMS/TMS can all be handled the same here */
   for (j = cnt; j > 0; j--) {
-    if (!(Pico.video.reg[0] & 0x4))
-      spal = (u32 *)tmspal; // fixed palette in TMS modes
+    if (!(Pico.video.reg[0] & 0x4)) // fixed palette in TMS modes
+      spal = (u32 *)tmspal + (PicoIn.AHW & (PAHW_SG|PAHW_SC) ? 16/2:0);
     for (i = 0x20/2; i > 0; i--, spal++, dpal++) { 
       t = *spal;
 #if defined(USE_BGR555)
@@ -776,8 +925,7 @@ void PicoDrawSetOutputSMS(pdso_t which)
   {
     case PDF_8BIT:   FinalizeLineSMS = FinalizeLine8bitSMS; break;
     case PDF_RGB555: FinalizeLineSMS = FinalizeLineRGB555SMS; break;
-    // there's no fast renderer yet, just treat it like PDF_8BIT
-    default:         FinalizeLineSMS = FinalizeLine8bitSMS;
+    default:         FinalizeLineSMS = NULL; // no multiple palettes, no scaling
                      PicoDrawSetInternalBuf(Pico.est.Draw2FB, 328); break;
   }
   rendstatus_old = -1;

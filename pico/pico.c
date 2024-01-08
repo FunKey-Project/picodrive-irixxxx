@@ -146,7 +146,9 @@ PICO_INTERNAL void PicoDetectRegion(void)
   else if (support&1)   hw=0x00;          // Japan NTSC
   else hw=0x80; // USA
 
-  Pico.m.hardware=(unsigned char)(hw|0x20); // No disk attached
+  if (!(PicoIn.AHW & PAHW_MCD)) hw |= 0x20; // No disk attached
+
+  Pico.m.hardware=(unsigned char)hw; 
   Pico.m.pal=pal;
 }
 
@@ -187,9 +189,13 @@ int PicoReset(void)
   PsndReset(); // pal must be known here
 
   // create an empty "dma" to cause 68k exec start at random frame location
+  Pico.t.m68c_line_start = Pico.t.m68c_aim;
   PicoVideoFIFOWrite(rand() & 0x1fff, 0, 0, PVS_CPURD);
 
   SekFinishIdleDet();
+
+  if (PicoIn.opt & POPT_EN_32X)
+    PicoReset32x();
 
   if (PicoIn.AHW & PAHW_MCD) {
     PicoResetMCD();
@@ -199,9 +205,6 @@ int PicoReset(void)
   // reinit, so that checksum checks pass
   if (!(PicoIn.opt & POPT_DIS_IDLE_DET))
     SekInitIdleDet();
-
-  if (PicoIn.opt & POPT_EN_32X)
-    PicoReset32x();
 
   // reset sram state; enable sram access by default if it doesn't overlap with ROM
   Pico.m.sram_reg = 0;
@@ -222,8 +225,22 @@ void PicoLoopPrepare(void)
     // force setting possibly changed..
     Pico.m.pal = (PicoIn.regionOverride == 2 || PicoIn.regionOverride == 8) ? 1 : 0;
 
+  if (Pico.m.pal) {
+    Pico.t.vcnt_wrap = 0x103;
+    Pico.t.vcnt_adj = 57;
+  }
+  else {
+    Pico.t.vcnt_wrap = 0xEB;
+    Pico.t.vcnt_adj = 6;
+  }
+
   Pico.m.dirtyPal = 1;
   rendstatus_old = -1;
+
+  if (PicoIn.AHW & PAHW_MCD)
+    PicoMCDPrepare();
+  if (PicoIn.AHW & PAHW_32X)
+    Pico32xPrepare();
 }
 
 #include "pico_cmn.c"
@@ -285,7 +302,7 @@ void PicoFrameDrawOnly(void)
 {
   if (!(PicoIn.AHW & PAHW_SMS)) {
     PicoFrameStart();
-    PicoDrawSync(Pico.m.pal?239:223, 0);
+    PicoDrawSync(Pico.m.pal?239:223, 0, 0);
   } else {
     PicoFrameDrawOnlyMS();
   }

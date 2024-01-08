@@ -10,10 +10,6 @@
 #include "pico_int.h"
 #include <cpu/debug.h>
 
-#ifdef USE_LIBRETRO_VFS
-#include "file_stream_transforms.h"
-#endif
-
 #if defined(USE_LIBCHDR)
 #include "libchdr/chd.h"
 #include "libchdr/cdrom.h"
@@ -23,7 +19,7 @@
 #include <zlib.h>
 
 static int rom_alloc_size;
-static const char *rom_exts[] = { "bin", "gen", "smd", "iso", "sms", "gg", "sg" };
+static const char *rom_exts[] = { "bin", "gen", "smd", "md", "32x", "pco", "iso", "sms", "gg", "sg", "sc" };
 
 void (*PicoCartUnloadHook)(void);
 void (*PicoCartMemSetup)(void);
@@ -408,7 +404,9 @@ size_t pm_read(void *ptr, size_t bytes, pm_file *stream)
 {
   int ret;
 
-  if (stream->type == PMT_UNCOMPRESSED)
+  if (stream == NULL)
+    return -1;
+  else if (stream->type == PMT_UNCOMPRESSED)
   {
     ret = fread(ptr, 1, bytes, stream->file);
   }
@@ -518,8 +516,10 @@ size_t pm_read(void *ptr, size_t bytes, pm_file *stream)
 
 size_t pm_read_audio(void *ptr, size_t bytes, pm_file *stream)
 {
+  if (stream == NULL)
+    return -1;
 #if !(CPU_IS_LE)
-  if (stream->type == PMT_UNCOMPRESSED)
+  else if (stream->type == PMT_UNCOMPRESSED)
   {
     // convert little endian audio samples from WAV file
     int ret = pm_read(ptr, bytes, stream);
@@ -546,7 +546,9 @@ size_t pm_read_audio(void *ptr, size_t bytes, pm_file *stream)
 
 int pm_seek(pm_file *stream, long offset, int whence)
 {
-  if (stream->type == PMT_UNCOMPRESSED)
+  if (stream == NULL)
+    return -1;
+  else if (stream->type == PMT_UNCOMPRESSED)
   {
     fseek(stream->file, offset, whence);
     return ftell(stream->file);
@@ -711,26 +713,22 @@ static unsigned char *PicoCartAlloc(int filesize, int is_sms)
 {
   unsigned char *rom;
 
+  // make size power of 2 for easier banking handling
+  int s = 0, tmp = filesize;
+  while ((tmp >>= 1) != 0)
+    s++;
+  if (filesize > (1 << s))
+    s++;
+  rom_alloc_size = 1 << s;
+
   if (is_sms) {
-    // make size power of 2 for easier banking handling
-    int s = 0, tmp = filesize;
-    while ((tmp >>= 1) != 0)
-      s++;
-    if (filesize > (1 << s))
-      s++;
-    rom_alloc_size = 1 << s;
     // be sure we can cover all address space
     if (rom_alloc_size < 0x10000)
       rom_alloc_size = 0x10000;
   }
   else {
-    // make alloc size at least sizeof(mcd_state),
-    // in case we want to switch to CD mode
-    if (filesize < sizeof(mcd_state))
-      filesize = sizeof(mcd_state);
-
     // align to 512K for memhandlers
-    rom_alloc_size = (filesize + 0x7ffff) & ~0x7ffff;
+    rom_alloc_size = (rom_alloc_size + 0x7ffff) & ~0x7ffff;
   }
 
   if (rom_alloc_size - filesize < 4)
@@ -742,65 +740,75 @@ static unsigned char *PicoCartAlloc(int filesize, int is_sms)
   return rom;
 }
 
-int PicoCartLoad(pm_file *f,unsigned char **prom,unsigned int *psize,int is_sms)
+int PicoCartLoad(pm_file *f, const unsigned char *rom, unsigned int romsize,
+  unsigned char **prom, unsigned int *psize, int is_sms)
 {
-  unsigned char *rom;
+  unsigned char *rom_data = NULL;
   int size, bytes_read;
 
-  if (f == NULL)
+  if (!f && !rom)
     return 1;
 
-  size = f->size;
+  if (!rom)
+    size = f->size;
+  else
+    size = romsize;
+
   if (size <= 0) return 1;
   size = (size+3)&~3; // Round up to a multiple of 4
 
   // Allocate space for the rom plus padding
-  rom = PicoCartAlloc(size, is_sms);
-  if (rom == NULL) {
+  rom_data = PicoCartAlloc(size, is_sms);
+  if (rom_data == NULL) {
     elprintf(EL_STATUS, "out of memory (wanted %i)", size);
     return 2;
   }
 
-  if (PicoCartLoadProgressCB != NULL)
-  {
-    // read ROM in blocks, just for fun
-    int ret;
-    unsigned char *p = rom;
-    bytes_read=0;
-    do
+  if (!rom) {
+    if (PicoCartLoadProgressCB != NULL)
     {
-      int todo = size - bytes_read;
-      if (todo > 256*1024) todo = 256*1024;
-      ret = pm_read(p,todo,f);
-      bytes_read += ret;
-      p += ret;
-      PicoCartLoadProgressCB(bytes_read * 100LL / size);
+      // read ROM in blocks, just for fun
+      int ret;
+      unsigned char *p = rom_data;
+      bytes_read=0;
+      do
+      {
+        int todo = size - bytes_read;
+        if (todo > 256*1024) todo = 256*1024;
+        ret = pm_read(p,todo,f);
+        bytes_read += ret;
+        p += ret;
+        PicoCartLoadProgressCB(bytes_read * 100LL / size);
+      }
+      while (ret > 0);
     }
-    while (ret > 0);
+    else
+      bytes_read = pm_read(rom_data,size,f); // Load up the rom
+
+    if (bytes_read <= 0) {
+      elprintf(EL_STATUS, "read failed");
+      plat_munmap(rom_data, rom_alloc_size);
+      return 3;
+    }
   }
   else
-    bytes_read = pm_read(rom,size,f); // Load up the rom
-  if (bytes_read <= 0) {
-    elprintf(EL_STATUS, "read failed");
-    plat_munmap(rom, rom_alloc_size);
-    return 3;
-  }
+    memcpy(rom_data, rom, romsize);
 
   if (!is_sms)
   {
     // maybe we are loading MegaCD BIOS?
-    if (!(PicoIn.AHW & PAHW_MCD) && size == 0x20000 && (!strncmp((char *)rom+0x124, "BOOT", 4) ||
-         !strncmp((char *)rom+0x128, "BOOT", 4))) {
+    if (!(PicoIn.AHW & PAHW_MCD) && size == 0x20000 && (!strncmp((char *)rom_data+0x124, "BOOT", 4) ||
+         !strncmp((char *)rom_data+0x128, "BOOT", 4))) {
       PicoIn.AHW |= PAHW_MCD;
     }
 
     // Check for SMD:
     if (size >= 0x4200 && (size&0x3fff) == 0x200 &&
-        ((rom[0x2280] == 'S' && rom[0x280] == 'E') || (rom[0x280] == 'S' && rom[0x2281] == 'E'))) {
+        ((rom_data[0x2280] == 'S' && rom_data[0x280] == 'E') || (rom_data[0x280] == 'S' && rom_data[0x2281] == 'E'))) {
       elprintf(EL_STATUS, "SMD format detected.");
-      DecodeSmd(rom,size); size-=0x200; // Decode and byteswap SMD
+      DecodeSmd(rom_data,size); size-=0x200; // Decode and byteswap SMD
     }
-    else Byteswap(rom, rom, size); // Just byteswap
+    else Byteswap(rom_data, rom_data, size); // Just byteswap
   }
   else
   {
@@ -808,11 +816,11 @@ int PicoCartLoad(pm_file *f,unsigned char **prom,unsigned int *psize,int is_sms)
       elprintf(EL_STATUS, "SMD format detected.");
       // at least here it's not interleaved
       size -= 0x200;
-      memmove(rom, rom + 0x200, size);
+      memmove(rom_data, rom_data + 0x200, size);
     }
   }
 
-  if (prom)  *prom = rom;
+  if (prom)  *prom = rom_data;
   if (psize) *psize = size;
 
   return 0;
@@ -841,7 +849,7 @@ int PicoCartInsert(unsigned char *rom, unsigned int romsize, const char *carthw_
   }
   pdb_cleanup();
 
-  PicoIn.AHW &= PAHW_MCD|PAHW_SMS;
+  PicoIn.AHW &= ~(PAHW_32X|PAHW_SVP);
 
   PicoCartMemSetup = NULL;
   PicoDmaHook = NULL;
@@ -850,13 +858,17 @@ int PicoCartInsert(unsigned char *rom, unsigned int romsize, const char *carthw_
   PicoLoadStateHook = NULL;
   carthw_chunks = NULL;
 
-  if (!(PicoIn.AHW & (PAHW_MCD|PAHW_SMS)))
+  if (!(PicoIn.AHW & (PAHW_MCD|PAHW_SMS|PAHW_PICO)))
     PicoCartDetect(carthw_cfg);
-  else if (PicoIn.AHW & PAHW_SMS)
+  if (PicoIn.AHW & PAHW_SMS)
     PicoCartDetectMS();
+  if (PicoIn.AHW & PAHW_SVP)
+    PicoSVPStartup();
+  if (PicoIn.AHW & PAHW_PICO)
+    PicoInitPico();
 
   // setup correct memory map for loaded ROM
-  switch (PicoIn.AHW) {
+  switch (PicoIn.AHW & ~(PAHW_GG|PAHW_SG|PAHW_SC)) {
     default:
       elprintf(EL_STATUS|EL_ANOMALY, "starting in unknown hw configuration: %x", PicoIn.AHW);
     case 0:
@@ -896,8 +908,7 @@ void PicoCartUnload(void)
     PicoCartUnloadHook = NULL;
   }
 
-  if (PicoIn.AHW & PAHW_32X)
-    PicoUnload32x();
+  PicoUnload32x();
 
   if (Pico.rom != NULL) {
     SekFinishIdleDet();
@@ -907,15 +918,16 @@ void PicoCartUnload(void)
   PicoGameLoaded = 0;
 }
 
-static unsigned int rom_crc32(void)
+static unsigned int rom_crc32(int size)
 {
   unsigned int crc;
   elprintf(EL_STATUS, "caclulating CRC32..");
+  if (size <= 0 || size > Pico.romsize) size = Pico.romsize;
 
   // have to unbyteswap for calculation..
-  Byteswap(Pico.rom, Pico.rom, Pico.romsize);
-  crc = crc32(0, Pico.rom, Pico.romsize);
-  Byteswap(Pico.rom, Pico.rom, Pico.romsize);
+  Byteswap(Pico.rom, Pico.rom, size);
+  crc = crc32(0, Pico.rom, size);
+  Byteswap(Pico.rom, Pico.rom, size);
   return crc;
 }
 
@@ -1106,7 +1118,7 @@ static void parse_carthw(const char *carthw_cfg, int *fill_sram,
         goto bad;
 
       if (rom_crc == 0)
-        rom_crc = rom_crc32();
+        rom_crc = rom_crc32(64*1024);
       if (crc == rom_crc)
         any_checks_passed = 1;
       else
@@ -1122,9 +1134,9 @@ static void parse_carthw(const char *carthw_cfg, int *fill_sram,
       rstrip(p);
 
       if      (strcmp(p, "svp") == 0)
-        PicoSVPStartup();
+        PicoIn.AHW = PAHW_SVP;
       else if (strcmp(p, "pico") == 0)
-        PicoInitPico();
+        PicoIn.AHW = PAHW_PICO;
       else if (strcmp(p, "prot") == 0)
         carthw_sprot_startup();
       else if (strcmp(p, "ssf2_mapper") == 0)
@@ -1143,8 +1155,10 @@ static void parse_carthw(const char *carthw_cfg, int *fill_sram,
         carthw_sf002_startup();
       else if (strcmp(p, "sf004_mapper") == 0)
         carthw_sf004_startup();
-      else if (strcmp(p, "prot_lk3") == 0)
-        carthw_prot_lk3_startup();
+      else if (strcmp(p, "lk3_mapper") == 0)
+        carthw_lk3_startup();
+      else if (strcmp(p, "smw64_mapper") == 0)
+        carthw_smw64_startup();
       else {
         elprintf(EL_STATUS, "carthw:%d: unsupported mapper: %s", line, p);
         skip_sect = 1;
@@ -1188,6 +1202,12 @@ static void parse_carthw(const char *carthw_cfg, int *fill_sram,
         Pico.sv.flags &= ~SRF_EEPROM;
       else if (strcmp(p, "filled_sram") == 0)
         *fill_sram = 1;
+      else if (strcmp(p, "wwfraw_hack") == 0)
+        PicoIn.quirks |= PQUIRK_WWFRAW_HACK;
+      else if (strcmp(p, "blackthorne_hack") == 0)
+        PicoIn.quirks |= PQUIRK_BLACKTHORNE_HACK;
+      else if (strcmp(p, "marscheck_hack") == 0)
+        PicoIn.quirks |= PQUIRK_MARSCHECK_HACK;
       else if (strcmp(p, "force_6btn") == 0)
         PicoIn.quirks |= PQUIRK_FORCE_6BTN;
       else {
@@ -1322,6 +1342,45 @@ static void PicoCartDetect(const char *carthw_cfg)
   // Unusual region 'code'
   if (rom_strcmp(0x1f0, "EUROPE") == 0 || rom_strcmp(0x1f0, "Europe") == 0)
     *(u32 *) (Pico.rom + 0x1f0) = CPU_LE4(0x20204520);
+
+  // tweak for Blackthorne: master SH2 overwrites stack of slave SH2 being in PWM
+  // interrupt. On real hardware, nothing happens since slave fetches the values
+  // it has written from its cache, but picodrive doesn't emulate caching.
+  // move master memory area down by 0x100 bytes.
+  // XXX replace this abominable hack. It might cause other problems in the game!
+  if (PicoIn.quirks & PQUIRK_BLACKTHORNE_HACK) {
+    int i;
+    unsigned a = 0;
+    for (i = 0; i < Pico.romsize; i += 4) {
+      unsigned v = CPU_BE2(*(u32 *) (Pico.rom + i));
+      if (a && v == a + 0x400) { // patch if 2 pointers with offset 0x400 are found
+        elprintf(EL_STATUS, "auto-patching @%06x: %08x->%08x\n", i, v, v - 0x100);
+        *(u32 *) (Pico.rom + i) = CPU_BE2(v - 0x100);
+      }
+      // detect a pointer into the incriminating area
+      a = 0;
+      if (v >> 12 == 0x0603f000 >> 12 && !(v & 3))
+        a = v;
+    }
+  }
+
+  // tweak for Mars Check Program: copies 32K longwords (128KB) from a 64KB buffer
+  // in ROM or DRAM to SDRAM with DMA in 4-longword mode, overwriting an SDRAM comm
+  // area in turn. This crashes the test on emulators without CPU cache emulation.
+  // This may be a bug in Mars Check, since it's only checking for the 64KB result.
+  // Patch the DMA transfers so that they transfer only 64KB.
+  if (PicoIn.quirks & PQUIRK_MARSCHECK_HACK) {
+    int i;
+    unsigned a = 0;
+    for (i = 0; i < Pico.romsize; i += 4) {
+      unsigned v = CPU_BE2(*(u32 *) (Pico.rom + i));
+      if (a == 0xffffff8c && v == 0x5ee1) { // patch if 4-long xfer written to CHCR
+        elprintf(EL_STATUS, "auto-patching @%06x: %08x->%08x\n", i, v, v & ~0x800);
+        *(u32 *) (Pico.rom + i) = CPU_BE2(v & ~0x800); // change to half-sized xfer
+      }
+      a = v;
+    }
+  }
 }
 
 static void PicoCartDetectMS(void)

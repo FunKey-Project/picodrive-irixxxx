@@ -45,7 +45,7 @@ enum {
 	EOPT_SCALE_WIDE,	// DAR 14:9
 	EOPT_SCALE_FULL,	// DAR 16:9
 	// PSP vert:
-	EOPT_VSCALE_PAL = 1,	// always 240 lines
+	EOPT_VSCALE_43 = 1,	// DAR 4:3
 	EOPT_VSCALE_FULL,	// zoomed to full height
 };
 
@@ -215,6 +215,7 @@ void plat_update_volume(int has_changed, int is_up);
 void plat_video_clear_status(void);
 void plat_video_clear_buffers(void);
 void plat_video_set_size(int w, int h);
+void plat_video_set_shadow(int w, int h);
 
 #ifdef __cplusplus
 } // extern "C"

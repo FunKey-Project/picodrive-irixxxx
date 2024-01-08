@@ -210,12 +210,16 @@ static void do_pal_update_sms(void)
 		// SMS palette
 		0x0000, 0x0000, 0x00a0, 0x00f0, 0x0500, 0x0f00, 0x0005, 0x0ff0,
 		0x000a, 0x000f, 0x0055, 0x00ff, 0x0050, 0x0f0f, 0x0555, 0x0fff,
+		// TMS palette
+		0x0000, 0x0000, 0x04c2, 0x07d6, 0x0e55, 0x0f77, 0x055c, 0x0ee4,
+		0x055f, 0x077f, 0x05bc, 0x08ce, 0x03a2, 0x0b5c, 0x0ccc, 0x0fff,
 	};
 	int i;
 	
 	if (!(Pico.video.reg[0] & 0x4)) {
+		int sg = !!(PicoIn.AHW & (PAHW_SG|PAHW_SC));
 		for (i = Pico.est.SonicPalCount; i >= 0; i--)
-			do_pal_convert(localPal+i*0x40, tmspal, currentConfig.gamma, currentConfig.gamma2);
+			do_pal_convert(localPal+i*0x40, tmspal+sg*0x10, currentConfig.gamma, currentConfig.gamma2);
 	} else {
 		for (i = Pico.est.SonicPalCount; i >= 0; i--)
 			do_pal_convert(localPal+i*0x40, Pico.est.SonicPal+i*0x40, currentConfig.gamma, currentConfig.gamma2);
@@ -398,7 +402,7 @@ static void vidResetMode(void)
 #define SOUND_BLOCK_SIZE_PAL  (1764*2)
 #define SOUND_BLOCK_COUNT    8
 
-static short __attribute__((aligned(4))) sndBuffer[SOUND_BLOCK_SIZE_PAL*SOUND_BLOCK_COUNT + 44100/50*2];
+static short __attribute__((aligned(4))) sndBuffer[SOUND_BLOCK_SIZE_PAL*SOUND_BLOCK_COUNT + 54000/50*2];
 static short *snd_playptr = NULL, *sndBuffer_endptr = NULL;
 static int samples_made = 0, samples_done = 0, samples_block = 0;
 static int sound_thread_exit = 0;
@@ -487,6 +491,8 @@ void pemu_sound_start(void)
 		}
 	}
 
+	if (PicoIn.sndRate > 52000 && PicoIn.sndRate < 54000)
+		PicoIn.sndRate = YM2612_NATIVE_RATE();
 	ret = POPT_EN_FM|POPT_EN_PSG|POPT_EN_STEREO;
 	if (PicoIn.sndRate != PsndRate_old || (PicoIn.opt&ret) != (PicoOpt_old&ret) || Pico.m.pal != pal_old) {
 		PsndRerate(Pico.m.frame_count ? 1 : 0);
@@ -587,7 +593,9 @@ void pemu_prep_defconfig(void)
 	defaultConfig.CPUclock = 333;
 	defaultConfig.filter = EOPT_FILTER_BILINEAR; // bilinear filtering
 	defaultConfig.scaling = EOPT_SCALE_43;
-	defaultConfig.vscaling = EOPT_VSCALE_FULL;
+	defaultConfig.vscaling = EOPT_VSCALE_43;
+	defaultConfig.renderer = RT_8BIT_ACC;
+	defaultConfig.renderer32x = RT_8BIT_ACC;
 	defaultConfig.EmuOpt |= EOPT_SHOW_RTC;
 }
 
@@ -679,18 +687,18 @@ void plat_update_volume(int has_changed, int is_up)
 /* prepare for MD screen mode change */
 void emu_video_mode_change(int start_line, int line_count, int start_col, int col_count)
 {
-	/* NTSC always has 224 visible lines, anything smaller has bars */
-	if (line_count < 224 && line_count > 144) {
-		start_line -= (224-line_count) /2;
-		line_count = 224;
-	}
-
 	out_y = start_line; out_x = start_col;
 	out_h = line_count; out_w = col_count;
 
+	if (col_count == 248) // mind aspect ration when blanking 1st column
+		col_count = 256;
+
 	switch (currentConfig.vscaling) {
-	case EOPT_VSCALE_PAL:
-		vscale = (float)270/240;
+	case EOPT_VSCALE_43:
+		// ugh, mind GG...
+		if (line_count >= 160)
+			line_count = (Pico.m.pal ? 240 : 224);
+		vscale = (float)270/line_count;
 		break;
 	case EOPT_VSCALE_FULL:
 		vscale = (float)270/line_count;
@@ -733,6 +741,7 @@ void pemu_forced_frame(int no_scale, int do_emu)
 void plat_video_toggle_renderer(int change, int is_menu_call)
 {
 	change_renderer(change);
+	clearArea(1);
 
 	if (is_menu_call)
 		return;

@@ -153,10 +153,96 @@ m16_32_s2_no_unal2:
 
 
 
+.global mix_16h_to_32_resample_stereo @ int *dest, short *src, int count, int fac16
+
+mix_16h_to_32_resample_stereo:
+    stmfd   sp!, {r4-r9,lr}
+
+    subs    r2, r2, #2
+    mov     r4, #0
+    bmi     m16_32_rss_end
+
+m16_32_rss_loop:
+    ldmia   r0, {r5-r8}
+    mov     r9, r4, lsr #16
+    ldr     r12,[r1, r9, lsl #2]
+    add     r4, r4, r3
+    mov     r9, r4, lsr #16
+    ldr     lr ,[r1, r9, lsl #2]
+    add     r4, r4, r3
+    subs    r2, r2, #2
+    add     r6, r6, r12,asr #17
+    mov     r12,r12,lsl #16
+    add     r5, r5, r12,asr #17 @ we use half volume
+    add     r8, r8, lr, asr #17
+    mov     lr, lr, lsl #16
+    add     r7, r7, lr, asr #17
+    stmia   r0!,{r5-r8}
+    bpl     m16_32_rss_loop
+
+m16_32_rss_end:
+    tst     r2, #1
+    ldmeqfd sp!, {r4-r9,pc}
+    mov     r9, r4, lsr #16
+    ldr     lr ,[r1, r9, lsl #2]
+    ldmia   r0, {r5,r6}
+    mov     r12,lr, lsl #16
+    add     r5, r5, r12,asr #17
+    add     r6, r6, lr, asr #17
+    stmia   r0!,{r5,r6}
+
+    ldmfd   sp!, {r4-r9,lr}
+    bx      lr
+
+
+
+.global mix_16h_to_32_resample_mono @ int *dest, short *src, int count, int fac16
+
+mix_16h_to_32_resample_mono:
+    stmfd   sp!, {r4-r6,r9,lr}
+
+    subs    r2, r2, #2
+    mov     r4, #0
+    bmi     m16_32_rsm_end
+
+m16_32_rsm_loop:
+    ldmia   r0, {r5-r6}
+    mov     r9, r4, lsr #16
+    ldr     r12,[r1, r9, lsl #2]
+    add     r4, r4, r3
+    mov     r9, r4, lsr #16
+    ldr     lr ,[r1, r9, lsl #2]
+    add     r4, r4, r3
+    subs    r2, r2, #2
+    add     r5, r5, r12,asr #18
+    mov     r12,r12,lsl #16
+    add     r5, r5, r12,asr #18 @ we use half volume (= quarter vol per channel)
+    add     r6, r6, lr, asr #18
+    mov     lr, lr, lsl #16
+    add     r6, r6, lr, asr #18
+    stmia   r0!,{r5-r6}
+    bpl     m16_32_rsm_loop
+
+m16_32_rsm_end:
+    tst     r2, #1
+    ldmeqfd sp!, {r4-r6,r9,pc}
+    mov     r9, r4, lsr #16
+    ldr     lr ,[r1, r9, lsl #2]
+    ldr     r5, [r0]
+    mov     r12,lr, lsl #16
+    add     r5, r5, r12,asr #18
+    add     r5, r5, lr, asr #18
+    str     r5, [r0]
+
+    ldmfd   sp!, {r4-r6,r9,lr}
+    bx      lr
+
+
+
 @ limit
 @ reg=int_sample, r12=1, r8=tmp, kills flags
 .macro Limit reg
-@   sub     \reg, \reg, \reg, asr #2	@ reduce audio lvl to avoid clipping
+@    sub     \reg, \reg, \reg, asr #3	@ reduce audio lvl to avoid clipping
     add     r8, r12, \reg, asr #15
     bics    r8, r8, #1			@ in non-overflow conditions r8 is 0 or 1
     movne   \reg, #0x8000
@@ -166,7 +252,7 @@ m16_32_s2_no_unal2:
 @ limit and shift up by 16
 @ reg=int_sample, r12=1, r8=tmp, kills flags
 .macro Limitsh reg
-@   sub     \reg, \reg, \reg, asr #2	@ reduce audio lvl to avoid clipping
+@    sub     \reg, \reg, \reg, asr #3	@ reduce audio lvl to avoid clipping
     add     r8, r12,\reg, asr #15
     bics    r8, r8, #1			@ in non-overflow conditions r8 is 0 or 1
     moveq   \reg, \reg, lsl #16
@@ -186,11 +272,11 @@ m16_32_s2_no_unal2:
 @ lowpass filter
 @ in=int_sample (max 20 bit), y=filter memory, r12=alpha(Q8), r8=tmp
 .macro LPfilt in y
-@    asr     r8, \y, #8
+@    mov     r8, \y, asr #8
 @    rsb     r8, r8, \in, lsl #4		@ fixpoint 20.12
     sub     r8, \in, \y, asr #12		@ fixpoint 20.12
     mla     \y, r8, r12, \y
-    asr     \in, \y, #12
+    mov     \in, \y, asr #12
 .endm
 
 
@@ -465,8 +551,8 @@ m32_16l_st_l_no_unal2:
 mix_reset:
     ldr     r2, =filter
     rsb     r0, r0, #0x10000
-@    asr     r0, r0, #8
-    asr     r0, r0, #4
+@    mov     r0, r0, asr #8
+    mov     r0, r0, asr #4
     str     r0, [r2], #4
     mov     r1, #0
     str     r1, [r2], #4

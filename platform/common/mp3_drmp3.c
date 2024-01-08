@@ -9,6 +9,17 @@
 #include <stdio.h>
 
 #include <pico/pico_int.h>
+
+#ifdef USE_LIBRETRO_VFS
+// Ugh, drmp3 tries to use wfopen on windows, which breaks libretro VFS...
+#define __acrt_iob_func __acrt_iob_func2
+#define _wfopen_s(p,m)	NULL
+#define _wfopen(p,m)	NULL
+#endif
+#ifdef __GP2X__
+#define mp3dec_decode _mp3dec_decode
+#define mp3dec_start _mp3dec_start
+#endif
 #define DR_MP3_IMPLEMENTATION
 #include "dr_libs/dr_mp3.h"
 #include "mp3.h"

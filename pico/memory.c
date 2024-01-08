@@ -66,21 +66,54 @@ void z80_map_set(uptr *map, u16 start_addr, u16 end_addr,
 void cpu68k_map_set(uptr *map, u32 start_addr, u32 end_addr,
     const void *func_or_mh, int is_func)
 {
-  xmap_set(map, M68K_MEM_SHIFT, start_addr, end_addr, func_or_mh, is_func);
+  xmap_set(map, M68K_MEM_SHIFT, start_addr, end_addr, func_or_mh, is_func & 1);
 #ifdef EMU_F68K
   // setup FAME fetchmap
-  if (!is_func)
+  if (!(is_func & 1))
   {
+    M68K_CONTEXT *ctx = is_func & 2 ? &PicoCpuFS68k : &PicoCpuFM68k;
     int shiftout = 24 - FAMEC_FETCHBITS;
     int i = start_addr >> shiftout;
     uptr base = (uptr)func_or_mh - (i << shiftout);
     for (; i <= (end_addr >> shiftout); i++)
-      PicoCpuFM68k.Fetch[i] = base;
+      ctx->Fetch[i] = base;
   }
 #endif
 }
 
 // more specialized/optimized function (does same as above)
+void cpu68k_map_read_mem(u32 start_addr, u32 end_addr, void *ptr, int is_sub)
+{
+  uptr *r8map, *r16map;
+  uptr addr = (uptr)ptr;
+  int shift = M68K_MEM_SHIFT;
+  int i;
+
+  if (!is_sub) {
+    r8map = m68k_read8_map;
+    r16map = m68k_read16_map;
+  } else {
+    r8map = s68k_read8_map;
+    r16map = s68k_read16_map;
+  }
+
+  addr -= start_addr;
+  addr >>= 1;
+  for (i = start_addr >> shift; i <= end_addr >> shift; i++)
+    r8map[i] = r16map[i] = addr;
+#ifdef EMU_F68K
+  // setup FAME fetchmap
+  {
+    M68K_CONTEXT *ctx = is_sub ? &PicoCpuFS68k : &PicoCpuFM68k;
+    int shiftout = 24 - FAMEC_FETCHBITS;
+    i = start_addr >> shiftout;
+    addr = (uptr)ptr - (i << shiftout);
+    for (; i <= (end_addr >> shiftout); i++)
+      ctx->Fetch[i] = addr;
+  }
+#endif
+}
+
 void cpu68k_map_all_ram(u32 start_addr, u32 end_addr, void *ptr, int is_sub)
 {
   uptr *r8map, *r16map, *w8map, *w16map;
@@ -115,6 +148,55 @@ void cpu68k_map_all_ram(u32 start_addr, u32 end_addr, void *ptr, int is_sub)
       ctx->Fetch[i] = addr;
   }
 #endif
+}
+
+void cpu68k_map_read_funcs(u32 start_addr, u32 end_addr, u32 (*r8)(u32), u32 (*r16)(u32), int is_sub)
+{
+  uptr *r8map, *r16map;
+  uptr ar8 = (uptr)r8, ar16 = (uptr)r16;
+  int shift = M68K_MEM_SHIFT;
+  int i;
+
+  if (!is_sub) {
+    r8map = m68k_read8_map;
+    r16map = m68k_read16_map;
+  } else {
+    r8map = s68k_read8_map;
+    r16map = s68k_read16_map;
+  }
+
+  ar8 = (ar8 >> 1 ) | MAP_FLAG;
+  ar16 = (ar16 >> 1 ) | MAP_FLAG;
+  for (i = start_addr >> shift; i <= end_addr >> shift; i++)
+    r8map[i] = ar8, r16map[i] = ar16;
+}
+
+void cpu68k_map_all_funcs(u32 start_addr, u32 end_addr, u32 (*r8)(u32), u32 (*r16)(u32), void (*w8)(u32, u32), void (*w16)(u32, u32), int is_sub)
+{
+  uptr *r8map, *r16map, *w8map, *w16map;
+  uptr ar8 = (uptr)r8, ar16 = (uptr)r16;
+  uptr aw8 = (uptr)w8, aw16 = (uptr)w16;
+  int shift = M68K_MEM_SHIFT;
+  int i;
+
+  if (!is_sub) {
+    r8map = m68k_read8_map;
+    r16map = m68k_read16_map;
+    w8map = m68k_write8_map;
+    w16map = m68k_write16_map;
+  } else {
+    r8map = s68k_read8_map;
+    r16map = s68k_read16_map;
+    w8map = s68k_write8_map;
+    w16map = s68k_write16_map;
+  }
+
+  ar8 = (ar8 >> 1 ) | MAP_FLAG;
+  ar16 = (ar16 >> 1 ) | MAP_FLAG;
+  aw8 = (aw8 >> 1 ) | MAP_FLAG;
+  aw16 = (aw16 >> 1 ) | MAP_FLAG;
+  for (i = start_addr >> shift; i <= end_addr >> shift; i++)
+    r8map[i] = ar8, r16map[i] = ar16, w8map[i] = aw8, w16map[i] = aw16;
 }
 
 static u32 m68k_unmapped_read8(u32 a)
@@ -262,43 +344,29 @@ static u32 read_pad_team(int i, u32 out_bits)
   int phase = Pico.m.padTHPhase[i];
   u32 value;
 
-  if (phase == 0) {
+  switch (phase) {
+  case 0:
     value = 0x03;
-    goto out;
-  }
-  if (phase == 1) {
+    break;
+  case 1:
     value = 0x0f;
-    goto out;
-  }
-
-  pad = ~PicoIn.padInt[0]; // Get inverse of pad MXYZ SACB RLDU
-  if (phase == 8) {
+    break;
+  case 4: case 5: case 6: case 7: // controller IDs, all 3 btn for now
+    value = 0x00;
+    break;
+  case 8: case 10: case 12: case 14:
+    pad = ~PicoIn.padInt[(phase-8) >> 1];
     value = pad & 0x0f;                          // ?x?x RLDU
-    goto out;
-  }
-  else if(phase == 9) {
+    break;
+  case 9: case 11: case 13: case 15:
+    pad = ~PicoIn.padInt[(phase-8) >> 1];
     value = (pad & 0xf0) >>  4;                  // ?x?x SACB
-    goto out;
+    break;
+  default:
+    value = 0;
+    break;
   }
 
-  pad = ~PicoIn.padInt[1]; // Get inverse of pad MXYZ SACB RLDU
-  if (phase == 12) {
-    value = pad & 0x0f;                          // ?x?x RLDU
-    goto out;
-  }
-  else if(phase == 13) {
-    value = (pad & 0xf0) >>  4;                  // ?x?x SACB
-    goto out;
-  }
-
-  if (phase >= 8 && pad < 16) {
-    value = 0x0f;
-    goto out;
-  }
-
-  value = 0;
-
-out:
   value |= (out_bits & 0x40) | ((out_bits & 0x20)>>1);
   return value;
 }
@@ -308,8 +376,8 @@ static u32 read_pad_4way(int i, u32 out_bits)
   u32 pad = (PicoMem.ioports[2] & 0x70) >> 4;
   u32 value = 0;
 
-  if (i == 0 && !(pad & 1))
-    value = read_pad_3btn(pad >> 1, out_bits);
+  if (i == 0 && pad <= 3)
+    value = read_pad_3btn(pad, out_bits);
 
   value |= (out_bits & 0x40);
   return value;
@@ -328,6 +396,8 @@ static port_read_func *port_readers[3] = {
   read_nothing
 };
 
+static int padTHLatency[3]; // TODO this should be in the save file structures
+
 static NOINLINE u32 port_read(int i)
 {
   u32 data_reg = PicoMem.ioports[i + 1];
@@ -337,13 +407,17 @@ static NOINLINE u32 port_read(int i)
   out = data_reg & ctrl_reg;
 
   // pull-ups: should be 0x7f, but Decap Attack has a bug where it temp.
-  // disables output before doing TH-low read, so don't emulate it for TH.
+  // disables output before doing TH-low read, so emulate RC filter for TH.
   // Decap Attack reportedly doesn't work on Nomad but works on must
   // other MD revisions (different pull-up strength?).
-  if (PicoIn.AHW & (PAHW_32X|PAHW_MCD)) // don't do it on 32X, it breaks WWF Raw
-    out |= 0x7f & ~ctrl_reg;
-  else
-    out |= 0x3f & ~ctrl_reg;
+  u32 mask = 0x3f;
+  if (CYCLES_GE(padTHLatency[i], SekCyclesDone()+100))
+    padTHLatency[i] = SekCyclesDone(); // kludge to cope with cycle wrap
+  if (CYCLES_GE(SekCyclesDone(), padTHLatency[i])) {
+    mask |= 0x40;
+    padTHLatency[i] = SekCyclesDone();
+  }
+  out |= mask & ~ctrl_reg;
 
   in = port_readers[i](i, out);
 
@@ -357,7 +431,10 @@ void PicoSetInputDevice(int port, enum input_device device)
   if (port < 0 || port > 2)
     return;
 
-  switch (device) {
+  if (port == 1 && port_readers[0] == read_pad_team)
+    func = read_nothing;
+
+  else switch (device) {
   case PICO_INPUT_PAD_3BTN:
     func = read_pad_3btn;
     break;
@@ -409,13 +486,21 @@ NOINLINE void io_ports_write(u32 a, u32 d)
         Pico.m.padTHPhase[a - 1] = 0;
       else if ((d^PicoMem.ioports[a]) & 0x60)
         Pico.m.padTHPhase[a - 1]++;
-    } else if (port_readers[a - 1] == read_pad_4way) {
+    } else if (port_readers[0] == read_pad_4way) {
       if (a == 2 && ((PicoMem.ioports[a] ^ d) & 0x70))
         Pico.m.padTHPhase[0] = 0;
       if (a == 1 && !(PicoMem.ioports[a] & 0x40) && (d & 0x40))
         Pico.m.padTHPhase[0]++;
     } else if (!(PicoMem.ioports[a] & 0x40) && (d & 0x40))
       Pico.m.padTHPhase[a - 1]++;
+  }
+
+  // after switching TH to input there's a latency before the pullup value is 
+  // read back as input (see Decap Attack, not in Samurai Showdown, 32x WWF Raw)
+  if (4 <= a && a <= 5) {
+    if ((PicoMem.ioports[a] & 0x40) && !(d & 0x40) && !(PicoMem.ioports[a - 3] & 0x40))
+      // latency after switching to input and output was low
+      padTHLatency[a - 4] = SekCyclesDone() + 25;
   }
 
   // certain IO ports can be used as RAM
@@ -596,9 +681,10 @@ static u32 PicoRead8_z80(u32 a)
     return 0;
   }
 
-  if ((a & 0x4000) == 0x0000)
+  if ((a & 0x4000) == 0x0000) {
+    SekCyclesBurnRun(1);
     d = PicoMem.zram[a & 0x1fff];
-  else if ((a & 0x6000) == 0x4000) // 0x4000-0x5fff
+  } else if ((a & 0x6000) == 0x4000) // 0x4000-0x5fff
     d = ym2612_read_local_68k(); 
   else
     elprintf(EL_UIO|EL_ANOMALY, "68k bad read [%06x] @%06x", a, SekPc);
@@ -620,6 +706,7 @@ static void PicoWrite8_z80(u32 a, u32 d)
   }
 
   if ((a & 0x4000) == 0x0000) { // z80 RAM
+    SekCyclesBurnRun(1);
     PicoMem.zram[a & 0x1fff] = (u8)d;
     return;
   }
@@ -844,7 +931,7 @@ PICO_INTERNAL void PicoMemSetup(void)
   // align to bank size. We know ROM loader allocated enough for this
   mask = (1 << M68K_MEM_SHIFT) - 1;
   rs = (Pico.romsize + mask) & ~mask;
-  if (rs > 0x400000) rs = 0x400000; // max cartridge area
+  if (rs > 0xa00000) rs = 0xa00000; // max cartridge area
   cpu68k_map_set(m68k_read8_map,  0x000000, rs - 1, Pico.rom, 0);
   cpu68k_map_set(m68k_read16_map, 0x000000, rs - 1, Pico.rom, 0);
 
@@ -911,18 +998,6 @@ PICO_INTERNAL void PicoMemSetup(void)
   PicoCpuFM68k.write_byte = (void *)m68k_write8;
   PicoCpuFM68k.write_word = (void *)m68k_write16;
   PicoCpuFM68k.write_long = (void *)m68k_write32;
-
-  // setup FAME fetchmap
-  {
-    int i;
-    // by default, point everything to first 64k of ROM
-    for (i = 0; i < M68K_FETCHBANK1 * 0xe0 / 0x100; i++)
-      PicoCpuFM68k.Fetch[i] = (uptr)Pico.rom - (i<<(24-FAMEC_FETCHBITS));
-    // now real ROM
-    for (i = 0; i < M68K_FETCHBANK1 && (i<<(24-FAMEC_FETCHBITS)) < Pico.romsize; i++)
-      PicoCpuFM68k.Fetch[i] = (uptr)Pico.rom;
-    // RAM already set
-  }
 #endif
 #ifdef EMU_M68K
   m68k_mem_setup();
@@ -964,55 +1039,89 @@ static void m68k_mem_setup(void)
 static int get_scanline(int is_from_z80)
 {
   if (is_from_z80) {
-    int mclk_z80 = (z80_cyclesLeft<0 ? Pico.t.z80c_aim : z80_cyclesDone()) * 15;
-    int mclk_line = Pico.t.z80_scanline * 488 * 7;
-    while (mclk_z80 - mclk_line >= 488 * 7)
-      Pico.t.z80_scanline++, mclk_line += 488 * 7;
+    // ugh... compute by dividing cycles since frame start by cycles per line
+    // need some fractional resolution here, else there may be an extra line
+    int cycles_line = cycles_68k_to_z80((unsigned)(488.5*256))+1; // cycles per line, Q8
+    int cycles_z80 = (z80_cyclesLeft<0 ? Pico.t.z80c_aim:z80_cyclesDone())<<8;
+    int cycles = cycles_line * Pico.t.z80_scanline;
+    // approximation by multiplying with inverse
+    if (cycles_z80 - cycles >= 4*cycles_line) {
+      // compute 1/cycles_line, storing the result to avoid future dividing
+      static int cycles_line_o, cycles_line_i;
+      if (cycles_line_o != cycles_line)
+        { cycles_line_o = cycles_line, cycles_line_i = (1<<22) / cycles_line; }
+      // compute lines = diff/cycles_line = diff*(1/cycles_line)
+      int lines = ((cycles_z80 - cycles) * cycles_line_i) >> 22;
+      Pico.t.z80_scanline += lines, cycles += cycles_line * lines;
+    }
+    // handle any rounding leftover
+    while (cycles_z80 - cycles >= cycles_line)
+      Pico.t.z80_scanline ++, cycles += cycles_line;
     return Pico.t.z80_scanline;
   }
 
   return Pico.m.scanline;
 }
 
+#define ym2612_update_status(xcycles) \
+  if (xcycles >= Pico.t.timer_a_next_oflow) \
+    ym2612.OPN.ST.status |= (ym2612.OPN.ST.mode >> 2) & 1; \
+  if (xcycles >= Pico.t.timer_b_next_oflow) \
+    ym2612.OPN.ST.status |= (ym2612.OPN.ST.mode >> 2) & 2
+
 /* probably should not be in this file, but it's near related code here */
 void ym2612_sync_timers(int z80_cycles, int mode_old, int mode_new)
 {
   int xcycles = z80_cycles << 8;
 
-  /* check for overflows */
-  if ((mode_old & 4) && xcycles >= Pico.t.timer_a_next_oflow)
-    ym2612.OPN.ST.status |= 1;
+  // update timer status
+  ym2612_update_status(xcycles);
 
-  if ((mode_old & 8) && xcycles >= Pico.t.timer_b_next_oflow)
-    ym2612.OPN.ST.status |= 2;
-
-  /* update timer a */
+  // update timer a
   if (mode_old & 1)
-    while (xcycles > Pico.t.timer_a_next_oflow)
+    while (xcycles >= Pico.t.timer_a_next_oflow)
       Pico.t.timer_a_next_oflow += Pico.t.timer_a_step;
 
-  if ((mode_old ^ mode_new) & 1) // turning on/off
+  // turning on/off
+  if ((mode_old ^ mode_new) & 1)
   {
     if (mode_old & 1)
       Pico.t.timer_a_next_oflow = TIMER_NO_OFLOW;
-    else
-      Pico.t.timer_a_next_oflow = xcycles + Pico.t.timer_a_step;
+    else {
+      /* The internal tick of the YM2612 takes 144 clock cycles (with clock
+       * being OSC/7), or 67.2 z80 cycles. Timers are run once each tick.
+       * Starting a timer takes place at the next tick, so xcycles needs to be
+       * rounded up to that: t = next tick# = (xcycles / TICK_ZCYCLES) + 1
+       */
+      unsigned t = ((xcycles * (((1<<20)/TIMER_A_TICK_ZCYCLES)+1))>>20) + 1;
+      Pico.t.timer_a_next_oflow = t*TIMER_A_TICK_ZCYCLES + Pico.t.timer_a_step;
+    }
   }
+
   if (mode_new & 1)
     elprintf(EL_YMTIMER, "timer a upd to %i @ %i", Pico.t.timer_a_next_oflow>>8, z80_cycles);
 
-  /* update timer b */
+  // update timer b
   if (mode_old & 2)
-    while (xcycles > Pico.t.timer_b_next_oflow)
+    while (xcycles >= Pico.t.timer_b_next_oflow)
       Pico.t.timer_b_next_oflow += Pico.t.timer_b_step;
 
+  // turning on/off
   if ((mode_old ^ mode_new) & 2)
   {
     if (mode_old & 2)
       Pico.t.timer_b_next_oflow = TIMER_NO_OFLOW;
-    else
-      Pico.t.timer_b_next_oflow = xcycles + Pico.t.timer_b_step;
+    else {
+      /* timer b has a divider of 16 which runs in its own counter. It is not
+       * reset by loading timer b. The first run of timer b after loading is
+       * therefore shorter by up to 15 ticks.
+       */
+      unsigned t = ((xcycles * (((1<<20)/TIMER_A_TICK_ZCYCLES)+1))>>20) + 1;
+      int step = Pico.t.timer_b_step - TIMER_A_TICK_ZCYCLES*(t&15);
+      Pico.t.timer_b_next_oflow = t*TIMER_A_TICK_ZCYCLES + step;
+    }
   }
+
   if (mode_new & 2)
     elprintf(EL_YMTIMER, "timer b upd to %i @ %i", Pico.t.timer_b_next_oflow>>8, z80_cycles);
 }
@@ -1023,31 +1132,20 @@ static int ym2612_write_local(u32 a, u32 d, int is_from_z80)
   int addr;
 
   a &= 3;
-  if (a == 1 && ym2612.OPN.ST.address == 0x2a) /* DAC data */
-  {
-    int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
-    //elprintf(EL_STATUS, "%03i dac w %08x z80 %i", cycles, d, is_from_z80);
-    if (ym2612.dacen)
-      PsndDoDAC(cycles);
-    ym2612.dacout = ((int)d - 0x80) << 6;
-    return 0;
-  }
-
   switch (a)
   {
     case 0: /* address port 0 */
+    case 2: /* address port 1 */
       ym2612.OPN.ST.address = d;
-      ym2612.addr_A1 = 0;
+      ym2612.addr_A1 = (a & 2) >> 1;
 #ifdef __GP2X__
       if (PicoIn.opt & POPT_EXT_FM) YM2612Write_940(a, d, -1);
 #endif
       return 0;
 
     case 1: /* data port 0    */
-      if (ym2612.addr_A1 != 0)
-        return 0;
-
-      addr = ym2612.OPN.ST.address;
+    case 3: /* data port 1    */
+      addr = ym2612.OPN.ST.address | ((int)ym2612.addr_A1 << 8);
       ym2612.REGS[addr] = d;
 
       switch (addr)
@@ -1058,31 +1156,26 @@ static int ym2612_write_local(u32 a, u32 d, int is_from_z80)
                                      : ((ym2612.OPN.ST.TA & 0x3fc)|(d&3));
           if (ym2612.OPN.ST.TA != TAnew)
           {
+            int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
+            ym2612_sync_timers(cycles, ym2612.OPN.ST.mode, ym2612.OPN.ST.mode);
             //elprintf(EL_STATUS, "timer a set %i", TAnew);
             ym2612.OPN.ST.TA = TAnew;
             //ym2612.OPN.ST.TAC = (1024-TAnew)*18;
             //ym2612.OPN.ST.TAT = 0;
             Pico.t.timer_a_step = TIMER_A_TICK_ZCYCLES * (1024 - TAnew);
-            if (ym2612.OPN.ST.mode & 1) {
-              // this is not right, should really be done on overflow only
-              int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
-              Pico.t.timer_a_next_oflow = (cycles << 8) + Pico.t.timer_a_step;
-            }
             elprintf(EL_YMTIMER, "timer a set to %i, %i", 1024 - TAnew, Pico.t.timer_a_next_oflow>>8);
           }
           return 0;
         }
         case 0x26: // timer B
           if (ym2612.OPN.ST.TB != d) {
+            int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
+            ym2612_sync_timers(cycles, ym2612.OPN.ST.mode, ym2612.OPN.ST.mode);
             //elprintf(EL_STATUS, "timer b set %i", d);
             ym2612.OPN.ST.TB = d;
             //ym2612.OPN.ST.TBC = (256-d) * 288;
             //ym2612.OPN.ST.TBT  = 0;
-            Pico.t.timer_b_step = TIMER_B_TICK_ZCYCLES * (256 - d); // 262800
-            if (ym2612.OPN.ST.mode & 2) {
-              int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
-              Pico.t.timer_b_next_oflow = (cycles << 8) + Pico.t.timer_b_step;
-            }
+            Pico.t.timer_b_step = TIMER_B_TICK_ZCYCLES * (256 - d);
             elprintf(EL_YMTIMER, "timer b set to %i, %i", 256 - d, Pico.t.timer_b_next_oflow>>8);
           }
           return 0;
@@ -1090,10 +1183,10 @@ static int ym2612_write_local(u32 a, u32 d, int is_from_z80)
           int old_mode = ym2612.OPN.ST.mode;
           int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
 
-          ym2612.OPN.ST.mode = d;
-
           elprintf(EL_YMTIMER, "st mode %02x", d);
           ym2612_sync_timers(cycles, old_mode, d);
+
+          ym2612.OPN.ST.mode = d;
 
           /* reset Timer a flag */
           if (d & 0x10)
@@ -1112,6 +1205,14 @@ static int ym2612_write_local(u32 a, u32 d, int is_from_z80)
           }
           return 0;
         }
+        case 0x2a: { /* DAC data */
+          int cycles = is_from_z80 ? z80_cyclesDone() : z80_cycles_from_68k();
+          //elprintf(EL_STATUS, "%03i dac w %08x z80 %i", cycles, d, is_from_z80);
+          if (ym2612.dacen)
+            PsndDoDAC(cycles);
+          ym2612.dacout = ((int)d - 0x80) << 6;
+          return 0;
+        }
         case 0x2b: { /* DAC Sel  (YM2612) */
           ym2612.dacen = d & 0x80;
 #ifdef __GP2X__
@@ -1120,22 +1221,6 @@ static int ym2612_write_local(u32 a, u32 d, int is_from_z80)
           return 0;
         }
       }
-      break;
-
-    case 2: /* address port 1 */
-      ym2612.OPN.ST.address = d;
-      ym2612.addr_A1 = 1;
-#ifdef __GP2X__
-      if (PicoIn.opt & POPT_EXT_FM) YM2612Write_940(a, d, -1);
-#endif
-      return 0;
-
-    case 3: /* data port 1    */
-      if (ym2612.addr_A1 != 1)
-        return 0;
-
-      addr = ym2612.OPN.ST.address | 0x100;
-      ym2612.REGS[addr] = d;
       break;
   }
 
@@ -1148,17 +1233,11 @@ static int ym2612_write_local(u32 a, u32 d, int is_from_z80)
 }
 
 
-#define ym2612_read_local() \
-  if (xcycles >= Pico.t.timer_a_next_oflow) \
-    ym2612.OPN.ST.status |= (ym2612.OPN.ST.mode >> 2) & 1; \
-  if (xcycles >= Pico.t.timer_b_next_oflow) \
-    ym2612.OPN.ST.status |= (ym2612.OPN.ST.mode >> 2) & 2
-
 static u32 ym2612_read_local_z80(void)
 {
   int xcycles = z80_cyclesDone() << 8;
 
-  ym2612_read_local();
+  ym2612_update_status(xcycles);
 
   elprintf(EL_YMTIMER, "timer z80 read %i, sched %i, %i @ %i|%i",
     ym2612.OPN.ST.status, Pico.t.timer_a_next_oflow >> 8,
@@ -1170,7 +1249,7 @@ static u32 ym2612_read_local_68k(void)
 {
   int xcycles = z80_cycles_from_68k() << 8;
 
-  ym2612_read_local();
+  ym2612_update_status(xcycles);
 
   elprintf(EL_YMTIMER, "timer 68k read %i, sched %i, %i @ %i|%i",
     ym2612.OPN.ST.status, Pico.t.timer_a_next_oflow >> 8,
@@ -1264,11 +1343,23 @@ void PicoWrite16_32x(u32 a, u32 d) {}
 // -----------------------------------------------------------------
 //                        z80 memhandlers
 
+static void access_68k_bus(int delay) // bus delay as Q8
+{
+  // 68k bus access delay for z80. The fractional part needs to be accumulated
+  // until an additional cycle is full. That is then added to the integer part.
+  Pico.t.z80_busdelay = (delay&0xff) + (Pico.t.z80_busdelay&0xff); // accumulate
+  z80_subCLeft((delay>>8) + (Pico.t.z80_busdelay>>8));
+  // don't use SekCyclesBurn() here since the Z80 doesn't run in cycle lock to
+  // the 68K. Count the stolen cycles to be accounted later in the 68k CPU runs
+  Pico.t.z80_buscycles += 7;
+}
+
 static unsigned char z80_md_vdp_read(unsigned short a)
 {
-  z80_subCLeft(2);
+  if ((a & 0xff00) == 0x7f00) {
+    // 68k bus access delay=3.3 per kabuto, for notaz picotest 2.42<delay<2.57?
+    access_68k_bus(0x280); // Q8, picotest: 0x26d(>2.42) - 0x292(<2.57)
 
-  if ((a & 0x00f0) == 0x0000) {
     switch (a & 0x0d)
     {
       case 0x00: return PicoVideoRead8DataH(1);
@@ -1276,7 +1367,7 @@ static unsigned char z80_md_vdp_read(unsigned short a)
       case 0x04: return PicoVideoRead8CtlH(1);
       case 0x05: return PicoVideoRead8CtlL(1);
       case 0x08:
-      case 0x0c: return get_scanline(1); // FIXME: make it proper
+      case 0x0c: return PicoVideoGetV(get_scanline(1), 1);
       case 0x09:
       case 0x0d: return Pico.m.rotate++;
     }
@@ -1291,7 +1382,8 @@ static unsigned char z80_md_bank_read(unsigned short a)
   unsigned int addr68k;
   unsigned char ret;
 
-  z80_subCLeft(3);
+  // 68k bus access delay=3.3 per kabuto, but for notaz picotest 3.02<delay<3.32
+  access_68k_bus(0x340); // Q8, picotest: 0x306(>3.02)-0x351(<3.32)
 
   addr68k = Pico.m.z80_bank68k << 15;
   addr68k |= a & 0x7fff;
@@ -1331,6 +1423,9 @@ static void z80_md_vdp_br_write(unsigned int a, unsigned char data)
 static void z80_md_bank_write(unsigned int a, unsigned char data)
 {
   unsigned int addr68k;
+
+  // 68k bus access delay=3.3 per kabuto, but for notaz picotest 3.02<delay<3.32
+  access_68k_bus(0x340); // Q8, picotest: 0x306(>3.02)-0x351(<3.32)
 
   addr68k = Pico.m.z80_bank68k << 15;
   addr68k += a & 0x7fff;

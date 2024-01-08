@@ -5,6 +5,10 @@
 
 ;@ For commercial use, separate licencing terms must be obtained.
 
+;@ version 0.002:
+;@ modified for support of undefined F register bits by irixxxx, passes ZEXALL with a hack for
+;@ BIT n,(HL), which is the only instruction needing support for the internal WZ register.
+
 #include <pico/arm_features.h>
 
       .data
@@ -12,6 +16,8 @@
 
       .global DrZ80Run
       .global DrZ80Ver
+      .global DrZ80_ARM			;@ need these externally to convert flags in Z80F which
+      .global DrARM_Z80			;@   is in internal representation to its Z80 form
 
       .equiv INTERRUPT_MODE,         0	;@0 = Use internal int handler, 1 = Use Mames int handler
       .equiv FAST_Z80SP,             0	;@0 = Use mem functions for stack pointer, 1 = Use direct mem pointer
@@ -27,11 +33,12 @@
       .extern Interrupt
 .endif
 
-DrZ80Ver: .long 0x0001
+DrZ80Ver: .long 0x0002
 
 ;@ --------------------------- Defines ----------------------------
 ;@ Make sure that regs/pointers for z80pc to z80sp match up!
 
+	eabi_align .req r2	@ pushed for EABI alignment all over the place
 	z80_icount .req r3
 	opcodes    .req r4
 	cpucontext .req r5
@@ -83,8 +90,8 @@ DrZ80Ver: .long 0x0001
 	.equ ZFlag, 2
 	.equ SFlag, 3
 	.equ HFlag, 4
-	.equ NFlag, 5
-	.equ Flag3, 6
+	.equ Flag3, 5			;@ NB (Flag5-Flag3) must be (Z80_Flag5-Z80_Flag3)
+	.equ NFlag, 6
 	.equ Flag5, 7
 
 	.equ Z80_CFlag, 0
@@ -100,6 +107,39 @@ DrZ80Ver: .long 0x0001
 	.equ Z80_IF2, 1<<1
 	.equ Z80_HALT, 1<<2
 	.equ Z80_NMI, 1<<3
+
+;@---------------------------------------
+
+	.equ VBit, 1<<VFlag
+	.equ CBit, 1<<CFlag
+	.equ ZBit, 1<<ZFlag
+	.equ SBit, 1<<SFlag
+	.equ HBit, 1<<HFlag
+	.equ Bit3, 1<<Flag3
+	.equ NBit, 1<<NFlag
+	.equ Bit5, 1<<Flag5
+
+	.equ Z80_CBit, 1<<Z80_CFlag
+	.equ Z80_NBit, 1<<Z80_NFlag
+	.equ Z80_VBit, 1<<Z80_VFlag
+	.equ Z80_Bit3, 1<<Z80_Flag3
+	.equ Z80_HBit, 1<<Z80_HFlag
+	.equ Z80_Bit5, 1<<Z80_Flag5
+	.equ Z80_ZBit, 1<<Z80_ZFlag
+	.equ Z80_SBit, 1<<Z80_SFlag
+
+.macro copyFlag35 reg
+	and r1,\reg,#((1<<Z80_Flag3)|(1<<Z80_Flag5))<<24
+	orr z80f,z80f,r1,lsr#24-(Flag3-Z80_Flag3)
+.endm
+
+;@---------------------------------------
+
+	.equ OFFS_PZS, MAIN_opcodes-PZSTable_data
+	.equ OFFS_ZS,  MAIN_opcodes-ZSTable_data
+	.equ OFFS_ZF,  MAIN_opcodes-DrZ80_ARM
+	.equ OFFS_AF,  MAIN_opcodes-DrARM_Z80
+	.equ OFFS_DAA, MAIN_opcodes-DAATable
 
 ;@---------------------------------------
 
@@ -163,14 +203,14 @@ z80_xmap_read16: @ addr
 
 0:
     @ z80_xmap_read8 will save r3 and r12 for us
-    stmfd sp!,{r8,r9,lr}
+    stmfd sp!,{r2,r8,r9,lr}
     mov r8,r0
     bl z80_xmap_read8
     mov r9,r0
     add r0,r8,#1
     bl z80_xmap_read8
     orr r0,r9,r0,lsl #8
-    ldmfd sp!,{r8,r9,pc}
+    ldmfd sp!,{r2,r8,r9,pc}
 
 z80_xmap_write16: @ data, addr
     add r2,r1,#1
@@ -190,14 +230,14 @@ z80_xmap_write16: @ data, addr
     bx lr
 
 0:
-    stmfd sp!,{r8,r9,lr}
+    stmfd sp!,{r2,r8,r9,lr}
     mov r8,r0
     mov r9,r1
     bl z80_xmap_write8
     mov r0,r8,lsr #8
     add r1,r9,#1
     bl z80_xmap_write8
-    ldmfd sp!,{r8,r9,pc}
+    ldmfd sp!,{r2,r8,r9,pc}
 
 z80_xmap_rebase_pc:
     ldr r1,[cpucontext,#z80_read8]
@@ -209,11 +249,11 @@ z80_xmap_rebase_pc:
     bxcc lr
 
 z80_bad_jump:
-    stmfd sp!,{r3,r12,lr}
+    stmfd sp!,{r2,r3,r12,lr}
     mov lr,pc
     ldr pc,[cpucontext,#z80_rebasePC]
     mov z80pc,r0
-    ldmfd sp!,{r3,r12,pc}
+    ldmfd sp!,{r2,r3,r12,pc}
 
 .if FAST_Z80SP
 z80_xmap_rebase_sp:
@@ -227,11 +267,11 @@ z80_xmap_rebase_sp:
     addcc z80sp,r1,r0
     bxcc lr
 
-    stmfd sp!,{r3,r12,lr}
+    stmfd sp!,{r2,r3,r12,lr}
     mov lr,pc
     ldr pc,[cpucontext,#z80_rebaseSP]
     mov z80sp,r0
-    ldmfd sp!,{r3,r12,pc}
+    ldmfd sp!,{r2,r3,r12,pc}
 .endif @ FAST_Z80SP
  
 .endif @ DRZ80_XMAP
@@ -246,9 +286,9 @@ z80_xmap_rebase_sp:
 	sub r2,z80pc,r1
 	str r2,[cpucontext,#previouspc]
 .endif
-	ldrplb r0,[z80pc],#1
-	ldrpl pc,[opcodes,r0, lsl #2]
-	bmi z80_execute_end
+	ldrgtb r0,[z80pc],#1
+	ldrgt pc,[opcodes,r0, lsl #2]
+	ble z80_execute_end
 .endm
 
 .macro eatcycles cycs
@@ -359,6 +399,7 @@ z80_xmap_rebase_sp:
 	mov lr,pc
 	ldr pc,[cpucontext,#z80_read8]			;@ r0 = addr - data returned in r0
 .endif
+	orr z80f,z80f,r0,lsl#24				;@ save I/O value
 	mov r1,z80de, lsr #16
 .if DRZ80_XMAP
     bl z80_xmap_write8
@@ -410,6 +451,7 @@ z80_xmap_rebase_sp:
 	eor z80f,z80f,z80a,lsr#24
 	and z80f,z80f,#1<<HFlag					;@ H, correct
 	orr z80f,z80f,r0,lsr#28
+	copyFlag35 z80a
 .endm
 
 .macro opADCA
@@ -420,6 +462,7 @@ z80_xmap_rebase_sp:
 	mov z80f,z80f,lsr#28
 	tst z80a,#0x10000000					;@ H, correct
 	orrne z80f,z80f,#1<<HFlag
+	copyFlag35 z80a
 	fetch 4
 .endm
 
@@ -439,6 +482,7 @@ z80_xmap_rebase_sp:
 	mov z80f,z80f,lsr#28
 	cmn r1,r0,lsl#27
 	orrcs z80f,z80f,#1<<HFlag				;@ H, correct
+	copyFlag35 z80a
 	fetch 4
 .endm
 
@@ -454,6 +498,7 @@ z80_xmap_rebase_sp:
 	mov z80f,z80f,lsr#28
 	cmn r1,\reg,lsl#\shift+4
 	orrcs z80f,z80f,#1<<HFlag
+	copyFlag35 z80a
 .endm
 
 .macro opADDA
@@ -462,6 +507,7 @@ z80_xmap_rebase_sp:
 	mov z80f,z80f,lsr#28
 	tst z80a,#0x10000000					;@ H, correct
 	orrne z80f,z80f,#1<<HFlag
+	copyFlag35 z80a
 	fetch 4
 .endm
 
@@ -491,6 +537,7 @@ z80_xmap_rebase_sp:
 	mov z80f,z80f,lsr#28
 	cmn r1,r0,lsl#19
 	orrcs z80f,z80f,#1<<HFlag
+	copyFlag35 z80hl
 	fetch 15
 .endm
 
@@ -502,45 +549,49 @@ z80_xmap_rebase_sp:
 	mov z80f,z80f,lsr#28
 	tst z80hl,#0x10000000					;@ H, correct.
 	orrne z80f,z80f,#1<<HFlag
+	copyFlag35 z80hl
 	fetch 15
 .endm
 
 .macro opADD16 reg1 reg2
 	mov r1,\reg1,lsl#4						;@ Prepare for check of half carry
 	adds \reg1,\reg1,\reg2
-	bic z80f,z80f,#(1<<CFlag)|(1<<HFlag)|(1<<NFlag)
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<VFlag)
 	orrcs z80f,z80f,#1<<CFlag
 	cmn r1,\reg2,lsl#4
 	orrcs z80f,z80f,#1<<HFlag
+	copyFlag35 \reg1
 .endm
 
 .macro opADD16s reg1 reg2 shift
 	mov r1,\reg1,lsl#4						;@ Prepare for check of half carry
 	adds \reg1,\reg1,\reg2,lsl#\shift
-	bic z80f,z80f,#(1<<CFlag)|(1<<HFlag)|(1<<NFlag)
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<VFlag)
 	orrcs z80f,z80f,#1<<CFlag
 	cmn r1,\reg2,lsl#4+\shift
 	orrcs z80f,z80f,#1<<HFlag
+	copyFlag35 \reg1
 .endm
 
 .macro opADD16_2 reg
 	adds \reg,\reg,\reg
-	bic z80f,z80f,#(1<<CFlag)|(1<<HFlag)|(1<<NFlag)
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<VFlag)
 	orrcs z80f,z80f,#1<<CFlag
 	tst \reg,#0x10000000					;@ H, correct.
 	orrne z80f,z80f,#1<<HFlag
+	copyFlag35 \reg
 .endm
 ;@---------------------------------------
 
 .macro opAND reg shift
 	and z80a,z80a,\reg,lsl#\shift
-	sub r0,opcodes,#0x100
+	sub r0,opcodes,#OFFS_PZS
 	ldrb z80f,[r0,z80a, lsr #24]
 	orr z80f,z80f,#1<<HFlag
 .endm
 
 .macro opANDA
-	sub r0,opcodes,#0x100
+	sub r0,opcodes,#OFFS_PZS
 	ldrb z80f,[r0,z80a, lsr #24]
 	orr z80f,z80f,#1<<HFlag
 	fetch 4
@@ -566,6 +617,7 @@ z80_xmap_rebase_sp:
 	tst \reg,#1<<(24+\bit)
 	orreq z80f,z80f,#(1<<HFlag)|(1<<ZFlag)|(1<<VFlag)
 	orrne z80f,z80f,#(1<<HFlag)
+	copyFlag35 \reg
 	fetch 8
 .endm
 
@@ -574,6 +626,7 @@ z80_xmap_rebase_sp:
 	tst \reg,#1<<(24+7)
 	orreq z80f,z80f,#(1<<HFlag)|(1<<ZFlag)|(1<<VFlag)
 	orrne z80f,z80f,#(1<<HFlag)|(1<<SFlag)
+	copyFlag35 \reg
 	fetch 8
 .endm
 
@@ -582,6 +635,8 @@ z80_xmap_rebase_sp:
 	tst \reg,#1<<(16+\bit)
 	orreq z80f,z80f,#(1<<HFlag)|(1<<ZFlag)|(1<<VFlag)
 	orrne z80f,z80f,#(1<<HFlag)
+	mov r1,\reg,lsl#8
+	copyFlag35 r1
 	fetch 8
 .endm
 
@@ -590,21 +645,27 @@ z80_xmap_rebase_sp:
 	tst \reg,#1<<(16+7)
 	orreq z80f,z80f,#(1<<HFlag)|(1<<ZFlag)|(1<<VFlag)
 	orrne z80f,z80f,#(1<<HFlag)|(1<<SFlag)
+	mov r1,\reg,lsl#8
+	copyFlag35 r1
 	fetch 8
 .endm
 
 .macro opBITb bit
+	mov r1,z80f				;@ memory address in upper flags
 	and z80f,z80f,#1<<CFlag
 	tst r0,#1<<\bit
 	orreq z80f,z80f,#(1<<HFlag)|(1<<ZFlag)|(1<<VFlag)
 	orrne z80f,z80f,#(1<<HFlag)
+	copyFlag35 r1
 .endm
 
 .macro opBIT7b
+	mov r1,z80f
 	and z80f,z80f,#1<<CFlag
 	tst r0,#1<<7
 	orreq z80f,z80f,#(1<<HFlag)|(1<<ZFlag)|(1<<VFlag)
 	orrne z80f,z80f,#(1<<HFlag)|(1<<SFlag)
+	copyFlag35 r1
 .endm
 ;@---------------------------------------
 
@@ -616,10 +677,13 @@ z80_xmap_rebase_sp:
 	eor z80f,z80f,#(1<<CFlag)|(1<<NFlag)	;@ invert C and set n
 	cmp r1,\reg,lsl#\shift+4
 	orrcc z80f,z80f,#1<<HFlag
+	mov r1,\reg,lsl#\shift
+	copyFlag35 r1
 .endm
 
 .macro opCPA
 	mov z80f,#(1<<ZFlag)|(1<<NFlag)			;@ set Z & n
+	copyFlag35 z80a
 	fetch 4
 .endm
 
@@ -641,25 +705,18 @@ z80_xmap_rebase_sp:
 
 .macro opDEC8 reg							;@for A and memory
 	and z80f,z80f,#1<<CFlag					;@save carry
-	orr z80f,z80f,#1<<NFlag					;@set n
 	tst \reg,#0x0f000000
 	orreq z80f,z80f,#1<<HFlag
 	subs \reg,\reg,#0x01000000
-	orrmi z80f,z80f,#1<<SFlag
+	sub r1,opcodes,#OFFS_ZS
+	ldrb r1,[r1,\reg,lsr#24]
 	orrvs z80f,z80f,#1<<VFlag
-	orreq z80f,z80f,#1<<ZFlag
+	orr z80f,z80f,#1<<NFlag					;@set n
+	orr z80f,z80f,r1
 .endm
 
 .macro opDEC8H reg							;@for B, D & H
-	and z80f,z80f,#1<<CFlag					;@save carry
-	orr z80f,z80f,#1<<NFlag					;@set n
-	tst \reg,#0x0f000000
-	orreq z80f,z80f,#1<<HFlag
-	subs \reg,\reg,#0x01000000
-	orrmi z80f,z80f,#1<<SFlag
-	orrvs z80f,z80f,#1<<VFlag
-	tst \reg,#0xff000000					;@Z
-	orreq z80f,z80f,#1<<ZFlag
+	opDEC8 \reg
 .endm
 
 .macro opDEC8L reg							;@for C, E & L
@@ -676,10 +733,12 @@ z80_xmap_rebase_sp:
 ;@---------------------------------------
 
 .macro opIN
-	stmfd sp!,{r3,r12}
+	str z80_icount,[cpucontext,#cycles_pointer]
+	stmfd sp!,{r2,r12}
 	mov lr,pc
 	ldr pc,[cpucontext,#z80_in]				;@ r0=port - data returned in r0
-	ldmfd sp!,{r3,r12}
+	ldr z80_icount,[cpucontext,#cycles_pointer]
+	ldmfd sp!,{r2,r12}
 .endm
 
 .macro opIN_C
@@ -691,11 +750,12 @@ z80_xmap_rebase_sp:
 .macro opINC8 reg							;@for A and memory
 	and z80f,z80f,#1<<CFlag					;@save carry, clear n
 	adds \reg,\reg,#0x01000000
-	orrmi z80f,z80f,#1<<SFlag
+	sub r1,opcodes,#OFFS_ZS
+	ldrb r1,[r1,\reg,lsr#24]
 	orrvs z80f,z80f,#1<<VFlag
-	orrcs z80f,z80f,#1<<ZFlag				;@cs when going from 0xFF to 0x00
 	tst \reg,#0x0f000000
 	orreq z80f,z80f,#1<<HFlag
+	orr z80f,z80f,r1
 .endm
 
 .macro opINC8H reg							;@for B, D & H
@@ -717,12 +777,12 @@ z80_xmap_rebase_sp:
 
 .macro opOR reg shift
 	orr z80a,z80a,\reg,lsl#\shift
-	sub r0,opcodes,#0x100
+	sub r0,opcodes,#OFFS_PZS
 	ldrb z80f,[r0,z80a, lsr #24]
 .endm
 
 .macro opORA
-	sub r0,opcodes,#0x100
+	sub r0,opcodes,#OFFS_PZS
 	ldrb z80f,[r0,z80a, lsr #24]
 	fetch 4
 .endm
@@ -744,10 +804,12 @@ z80_xmap_rebase_sp:
 ;@---------------------------------------
 
 .macro opOUT
-	stmfd sp!,{r3,r12}
+	str z80_icount,[cpucontext,#cycles_pointer]
+	stmfd sp!,{r2,r12}
 	mov lr,pc
 	ldr pc,[cpucontext,#z80_out]			;@ r0=port r1=data
-	ldmfd sp!,{r3,r12}
+	ldr z80_icount,[cpucontext,#cycles_pointer]
+	ldmfd sp!,{r2,r12}
 .endm
 
 .macro opOUT_C
@@ -840,18 +902,18 @@ z80_xmap_rebase_sp:
 
 .macro opRESmem bit
 .if DRZ80_XMAP
-	stmfd sp!,{r0}							;@ save addr as well
+	stmfd sp!,{r0,r2}						;@ save addr as well
 	bl z80_xmap_read8
 	bic r0,r0,#1<<\bit
-	ldmfd sp!,{r1}							;@ restore addr into r1
+	ldmfd sp!,{r1,r2}						;@ restore addr into r1
 	bl z80_xmap_write8
 .else
 	stmfd sp!,{r3,r12}
-	stmfd sp!,{r0}							;@ save addr as well
+	stmfd sp!,{r0,r2}						;@ save addr as well
 	mov lr,pc
 	ldr pc,[cpucontext,#z80_read8]			;@ r0=addr - data returned in r0
 	bic r0,r0,#1<<\bit
-	ldmfd sp!,{r1}							;@ restore addr into r1
+	ldmfd sp!,{r1,r2}						;@ restore addr into r1
 	mov lr,pc
 	ldr pc,[cpucontext,#z80_write8]			;@ r0=data r1=addr
 	ldmfd sp!,{r3,r12}
@@ -866,7 +928,7 @@ z80_xmap_rebase_sp:
 	orrne \reg1,\reg1,#0x01000000
 ;@	and r2,z80f,#1<<CFlag
 ;@	orr $x,$x,r2,lsl#23
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg1,lsr#24]				;@get PZS
 	orrcs z80f,z80f,#1<<CFlag
 .endm
@@ -881,7 +943,7 @@ z80_xmap_rebase_sp:
 	adds \reg,\reg,r0
 	tst z80f,#1<<CFlag						;@doesn't affect ARM carry, as long as the imidiate value is < 0x100. Watch out!
 	orrne \reg,\reg,#0x01000000
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg,lsr#24]				;@get PZS
 	orrcs z80f,z80f,#1<<CFlag
 	fetch 8
@@ -903,7 +965,7 @@ z80_xmap_rebase_sp:
 .macro opRLC reg1 reg2 shift
 	movs \reg1,\reg2,lsl#\shift
 	orrcs \reg1,\reg1,#0x01000000
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg1,lsr#24]
 	orrcs z80f,z80f,#1<<CFlag
 .endm
@@ -917,7 +979,7 @@ z80_xmap_rebase_sp:
 	and r0,\reg,#0xFF000000					;@mask high to r0
 	adds \reg,\reg,r0
 	orrcs \reg,\reg,#0x01000000
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg,lsr#24]
 	orrcs z80f,z80f,#1<<CFlag
 	fetch 8
@@ -942,7 +1004,7 @@ z80_xmap_rebase_sp:
 	orrne \reg1,\reg1,#0x00000080
 ;@	and r2,z80_f,#PSR_C
 ;@	orr \reg1,\reg1,r2,lsl#6
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg1]
 	orrcs z80f,z80f,#1<<CFlag
 .endm
@@ -951,7 +1013,7 @@ z80_xmap_rebase_sp:
 	orr z80a,z80a,z80f,lsr#1				;@get C
 	movs z80a,z80a,ror#25
 	mov z80a,z80a,lsl#24
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,z80a,lsr#24]
 	orrcs z80f,z80f,#1<<CFlag
 	fetch 8
@@ -962,7 +1024,7 @@ z80_xmap_rebase_sp:
 	movs r0,r0,ror#25
 	and \reg,\reg,#0x00FF0000				;@mask out low
 	orr \reg,\reg,r0,lsl#24
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg,lsr#24]
 	orrcs z80f,z80f,#1<<CFlag
 	fetch 8
@@ -984,7 +1046,7 @@ z80_xmap_rebase_sp:
 .macro opRRC reg1 reg2 shift
 	movs \reg1,\reg2,lsr#\shift
 	orrcs \reg1,\reg1,#0x00000080
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg1]
 	orrcs z80f,z80f,#1<<CFlag
 .endm
@@ -1036,6 +1098,7 @@ z80_xmap_rebase_sp:
 	and z80f,z80f,#1<<HFlag					;@ H, correct
 	orr z80f,z80f,r0,lsr#28					;@ S,Z,V&C
 	eor z80f,z80f,#(1<<CFlag)|(1<<NFlag)	;@ invert C and set n.
+	copyFlag35 z80a
 .endm
 
 .macro opSBCA
@@ -1043,7 +1106,7 @@ z80_xmap_rebase_sp:
 	movcc z80a,#0x00000000
 	movcs z80a,#0xFF000000
 	movcc z80f,#(1<<NFlag)|(1<<ZFlag)
-	movcs z80f,#(1<<NFlag)|(1<<SFlag)|(1<<CFlag)|(1<<HFlag)
+	movcs z80f,#(1<<NFlag)|(1<<SFlag)|(1<<CFlag)|(1<<HFlag)|(1<<Flag3)|(1<<Flag5)
 	fetch 4
 .endm
 
@@ -1065,6 +1128,7 @@ z80_xmap_rebase_sp:
 	eor z80f,z80f,#(1<<CFlag)|(1<<NFlag)	;@ invert C and set n.
 	cmp r1,r0,lsl#4
 	orrcc z80f,z80f,#1<<HFlag				;@ H, correct
+	copyFlag35 z80a
 	fetch 4
 .endm
 
@@ -1085,6 +1149,7 @@ z80_xmap_rebase_sp:
 	eor z80f,z80f,#(1<<CFlag)|(1<<NFlag)	;@ invert C and set n.
 	cmp r1,r0,lsl#4
 	orrcc z80f,z80f,#1<<HFlag				;@ H, correct
+	copyFlag35 z80hl
 	fetch 15
 .endm
 
@@ -1093,7 +1158,7 @@ z80_xmap_rebase_sp:
 	mov z80hl,#0x00000000
 	subcs z80hl,z80hl,#0x00010000
 	movcc z80f,#(1<<NFlag)|(1<<ZFlag)
-	movcs z80f,#(1<<NFlag)|(1<<SFlag)|(1<<CFlag)|(1<<HFlag)
+	movcs z80f,#(1<<NFlag)|(1<<SFlag)|(1<<CFlag)|(1<<HFlag)|(1<<Flag3)|(1<<Flag5)
 	fetch 15
 .endm
 ;@---------------------------------------
@@ -1121,18 +1186,18 @@ z80_xmap_rebase_sp:
 
 .macro opSETmem bit
 .if DRZ80_XMAP
-	stmfd sp!,{r0}	;@ save addr as well
+	stmfd sp!,{r0,r2}	;@ save addr as well
 	bl z80_xmap_read8
 	orr r0,r0,#1<<\bit
-	ldmfd sp!,{r1}	;@ restore addr into r1
+	ldmfd sp!,{r1,r2}	;@ restore addr into r1
 	bl z80_xmap_write8
 .else
 	stmfd sp!,{r3,r12}
-	stmfd sp!,{r0}	;@ save addr as well
+	stmfd sp!,{r0,r2}	;@ save addr as well
 	mov lr,pc
 	ldr pc,[cpucontext,#z80_read8]			;@ r0=addr - data returned in r0
 	orr r0,r0,#1<<\bit
-	ldmfd sp!,{r1}	;@ restore addr into r1
+	ldmfd sp!,{r1,r2}	;@ restore addr into r1
 	mov lr,pc
 	ldr pc,[cpucontext,#z80_write8]			;@ r0=data r1=addr
 	ldmfd sp!,{r3,r12}
@@ -1143,7 +1208,7 @@ z80_xmap_rebase_sp:
 
 .macro opSLA reg1 reg2 shift
 	movs \reg1,\reg2,lsl#\shift
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg1,lsr#24]
 	orrcs z80f,z80f,#1<<CFlag
 .endm
@@ -1156,7 +1221,7 @@ z80_xmap_rebase_sp:
 .macro opSLAH reg
 	and r0,\reg,#0xFF000000					;@mask high to r0
 	adds \reg,\reg,r0
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg,lsr#24]
 	orrcs z80f,z80f,#1<<CFlag
 	fetch 8
@@ -1178,7 +1243,7 @@ z80_xmap_rebase_sp:
 .macro opSLL reg1 reg2 shift
 	movs \reg1,\reg2,lsl#\shift
 	orr \reg1,\reg1,#0x01000000
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg1,lsr#24]
 	orrcs z80f,z80f,#1<<CFlag
 .endm
@@ -1192,7 +1257,7 @@ z80_xmap_rebase_sp:
 	and r0,\reg,#0xFF000000					;@mask high to r0
 	adds \reg,\reg,r0
 	orr \reg,\reg,#0x01000000
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg,lsr#24]
 	orrcs z80f,z80f,#1<<CFlag
 	fetch 8
@@ -1214,7 +1279,7 @@ z80_xmap_rebase_sp:
 .macro opSRA reg1 reg2
 	movs \reg1,\reg2,asr#25
 	and \reg1,\reg1,#0xFF
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg1]
 	orrcs z80f,z80f,#1<<CFlag
 .endm
@@ -1222,7 +1287,7 @@ z80_xmap_rebase_sp:
 .macro opSRAA
 	movs r0,z80a,asr#25
 	mov z80a,r0,lsl#24
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,z80a,lsr#24]
 	orrcs z80f,z80f,#1<<CFlag
 	fetch 8
@@ -1232,7 +1297,7 @@ z80_xmap_rebase_sp:
 	movs r0,\reg,asr#25
 	and \reg,\reg,#0x00FF0000				;@mask out low
 	orr \reg,\reg,r0,lsl#24
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg,lsr#24]
 	orrcs z80f,z80f,#1<<CFlag
 	fetch 8
@@ -1254,7 +1319,7 @@ z80_xmap_rebase_sp:
 
 .macro opSRL reg1 reg2 shift
 	movs \reg1,\reg2,lsr#\shift
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb z80f,[r1,\reg1]
 	orrcs z80f,z80f,#1<<CFlag
 .endm
@@ -1293,6 +1358,7 @@ z80_xmap_rebase_sp:
 	eor z80f,z80f,#(1<<CFlag)|(1<<NFlag)	;@ invert C and set n
 	cmp r1,\reg,lsl#\shift+4
 	orrcc z80f,z80f,#1<<HFlag
+	copyFlag35 z80a
 .endm
 
 .macro opSUBA
@@ -1319,7 +1385,7 @@ z80_xmap_rebase_sp:
 
 .macro opXOR reg shift
 	eor z80a,z80a,\reg,lsl#\shift
-	sub r0,opcodes,#0x100
+	sub r0,opcodes,#OFFS_PZS
 	ldrb z80f,[r0,z80a, lsr #24]
 .endm
 
@@ -1376,8 +1442,8 @@ DrZ80Run:
 	PIC_LDR(opcodes, r0, MAIN_opcodes)
 
 	cmp z80_icount,#0     ;@ irq might have used all cycles
-	ldrplb r0,[z80pc],#1
-	ldrpl pc,[opcodes,r0, lsl #2]
+	ldrgtb r0,[z80pc],#1
+	ldrgt pc,[opcodes,r0, lsl #2]
 
 
 z80_execute_end:
@@ -1404,7 +1470,7 @@ DoInterrupt:
 .else
 
 	;@ r0 == z80if
-	stmfd sp!,{lr}
+	stmfd sp!,{r2,lr}
 
 	tst r0,#4 ;@ check halt
 	addne z80pc,z80pc,#1
@@ -1512,16 +1578,16 @@ DoInterrupt_end:
 	ldr r0,[cpucontext, #z80irqcallback]
 	tst r0,r0
 	streqb r0,[cpucontext,#z80irq]       ;@ default handling
-	ldmeqfd sp!,{pc}
+	ldmeqfd sp!,{r2,pc}
 	stmfd sp!,{r3,r12}
 	mov lr,pc
 	mov pc,r0    ;@ call callback function
 	ldmfd sp!,{r3,r12}
-	ldmfd sp!,{pc} ;@ return
+	ldmfd sp!,{r2,pc} ;@ return
 .endif
 
 DoNMI:
-	stmfd sp!,{lr}
+	stmfd sp!,{r2,lr}
 
 	bic r0,r0,#((Z80_NMI|Z80_HALT|Z80_IF1)<<8)
 	strh r0,[cpucontext,#z80irq] @ 0x4C, irq and IFF bits
@@ -1547,2622 +1613,2717 @@ DoNMI:
 .endif
 	ldrh r0,[cpucontext,#z80irq] @ 0x4C, irq and IFF bits
 	eatcycles 11
-	ldmfd sp!,{pc}
+	ldmfd sp!,{r2,pc}
 
 
 .data
 .align 4
 
-DAATable: .hword  (0x00<<8)|(1<<ZFlag)|(1<<VFlag)
-         .hword  (0x01<<8)                  
-         .hword  (0x02<<8)                  
-         .hword  (0x03<<8)               |(1<<VFlag)
-         .hword  (0x04<<8)                  
-         .hword  (0x05<<8)               |(1<<VFlag)
-         .hword  (0x06<<8)               |(1<<VFlag)
-         .hword  (0x07<<8)                  
-         .hword  (0x08<<8)               
-         .hword  (0x09<<8)            |(1<<VFlag)
-         .hword  (0x10<<8)         |(1<<HFlag)      
-         .hword  (0x11<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x12<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x13<<8)         |(1<<HFlag)      
-         .hword  (0x14<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x15<<8)         |(1<<HFlag)      
-         .hword  (0x10<<8)                  
-         .hword  (0x11<<8)               |(1<<VFlag)
-         .hword  (0x12<<8)               |(1<<VFlag)
-         .hword  (0x13<<8)                  
-         .hword  (0x14<<8)               |(1<<VFlag)
-         .hword  (0x15<<8)                  
-         .hword  (0x16<<8)                  
-         .hword  (0x17<<8)               |(1<<VFlag)
-         .hword  (0x18<<8)            |(1<<VFlag)
-         .hword  (0x19<<8)               
-         .hword  (0x20<<8)      |(1<<HFlag)      
-         .hword  (0x21<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x22<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x23<<8)      |(1<<HFlag)      
-         .hword  (0x24<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x25<<8)      |(1<<HFlag)      
-         .hword  (0x20<<8)               
-         .hword  (0x21<<8)            |(1<<VFlag)
-         .hword  (0x22<<8)            |(1<<VFlag)
-         .hword  (0x23<<8)               
-         .hword  (0x24<<8)            |(1<<VFlag)
-         .hword  (0x25<<8)               
-         .hword  (0x26<<8)               
-         .hword  (0x27<<8)            |(1<<VFlag)
-         .hword  (0x28<<8)         |(1<<VFlag)
-         .hword  (0x29<<8)            
-         .hword  (0x30<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x31<<8)      |(1<<HFlag)      
-         .hword  (0x32<<8)      |(1<<HFlag)      
-         .hword  (0x33<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x34<<8)      |(1<<HFlag)      
-         .hword  (0x35<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x30<<8)            |(1<<VFlag)
-         .hword  (0x31<<8)               
-         .hword  (0x32<<8)               
-         .hword  (0x33<<8)            |(1<<VFlag)
-         .hword  (0x34<<8)               
-         .hword  (0x35<<8)            |(1<<VFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)
-         .hword  (0x37<<8)               
-         .hword  (0x38<<8)            
-         .hword  (0x39<<8)         |(1<<VFlag)
-         .hword  (0x40<<8)         |(1<<HFlag)      
-         .hword  (0x41<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x42<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x43<<8)         |(1<<HFlag)      
-         .hword  (0x44<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x45<<8)         |(1<<HFlag)      
-         .hword  (0x40<<8)                  
-         .hword  (0x41<<8)               |(1<<VFlag)
-         .hword  (0x42<<8)               |(1<<VFlag)
-         .hword  (0x43<<8)                  
-         .hword  (0x44<<8)               |(1<<VFlag)
-         .hword  (0x45<<8)                  
-         .hword  (0x46<<8)                  
-         .hword  (0x47<<8)               |(1<<VFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)
-         .hword  (0x49<<8)               
-         .hword  (0x50<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x51<<8)         |(1<<HFlag)      
-         .hword  (0x52<<8)         |(1<<HFlag)      
-         .hword  (0x53<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x54<<8)         |(1<<HFlag)      
-         .hword  (0x55<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x50<<8)               |(1<<VFlag)
-         .hword  (0x51<<8)                  
-         .hword  (0x52<<8)                  
-         .hword  (0x53<<8)               |(1<<VFlag)
-         .hword  (0x54<<8)                  
-         .hword  (0x55<<8)               |(1<<VFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)
-         .hword  (0x57<<8)                  
-         .hword  (0x58<<8)               
-         .hword  (0x59<<8)            |(1<<VFlag)
-         .hword  (0x60<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x61<<8)      |(1<<HFlag)      
-         .hword  (0x62<<8)      |(1<<HFlag)      
-         .hword  (0x63<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x64<<8)      |(1<<HFlag)      
-         .hword  (0x65<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x60<<8)            |(1<<VFlag)
-         .hword  (0x61<<8)               
-         .hword  (0x62<<8)               
-         .hword  (0x63<<8)            |(1<<VFlag)
-         .hword  (0x64<<8)               
-         .hword  (0x65<<8)            |(1<<VFlag)
-         .hword  (0x66<<8)            |(1<<VFlag)
-         .hword  (0x67<<8)               
-         .hword  (0x68<<8)            
-         .hword  (0x69<<8)         |(1<<VFlag)
-         .hword  (0x70<<8)      |(1<<HFlag)      
-         .hword  (0x71<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x72<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x73<<8)      |(1<<HFlag)      
-         .hword  (0x74<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x75<<8)      |(1<<HFlag)      
-         .hword  (0x70<<8)               
-         .hword  (0x71<<8)            |(1<<VFlag)
-         .hword  (0x72<<8)            |(1<<VFlag)
-         .hword  (0x73<<8)               
-         .hword  (0x74<<8)            |(1<<VFlag)
-         .hword  (0x75<<8)               
-         .hword  (0x76<<8)               
-         .hword  (0x77<<8)            |(1<<VFlag)
-         .hword  (0x78<<8)         |(1<<VFlag)
-         .hword  (0x79<<8)            
-         .hword  (0x80<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x81<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x82<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x83<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x84<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x85<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x80<<8)|(1<<SFlag)               
-         .hword  (0x81<<8)|(1<<SFlag)            |(1<<VFlag)
-         .hword  (0x82<<8)|(1<<SFlag)            |(1<<VFlag)
-         .hword  (0x83<<8)|(1<<SFlag)               
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)
-         .hword  (0x85<<8)|(1<<SFlag)               
-         .hword  (0x86<<8)|(1<<SFlag)               
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)
-         .hword  (0x89<<8)|(1<<SFlag)            
-         .hword  (0x90<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x91<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x92<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x93<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x94<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x95<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x90<<8)|(1<<SFlag)            |(1<<VFlag)
-         .hword  (0x91<<8)|(1<<SFlag)               
-         .hword  (0x92<<8)|(1<<SFlag)               
-         .hword  (0x93<<8)|(1<<SFlag)            |(1<<VFlag)
-         .hword  (0x94<<8)|(1<<SFlag)               
-         .hword  (0x95<<8)|(1<<SFlag)            |(1<<VFlag)
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)
-         .hword  (0x97<<8)|(1<<SFlag)               
-         .hword  (0x98<<8)|(1<<SFlag)            
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)
-         .hword  (0x00<<8)   |(1<<ZFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x01<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x02<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x03<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x04<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x05<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x00<<8)   |(1<<ZFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x01<<8)                     |(1<<CFlag)
-         .hword  (0x02<<8)                     |(1<<CFlag)
-         .hword  (0x03<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x04<<8)                     |(1<<CFlag)
-         .hword  (0x05<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x06<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x07<<8)                     |(1<<CFlag)
-         .hword  (0x08<<8)                  |(1<<CFlag)
-         .hword  (0x09<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x10<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x11<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x12<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x13<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x14<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x15<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x10<<8)                     |(1<<CFlag)
-         .hword  (0x11<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x12<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x13<<8)                     |(1<<CFlag)
-         .hword  (0x14<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x15<<8)                     |(1<<CFlag)
-         .hword  (0x16<<8)                     |(1<<CFlag)
-         .hword  (0x17<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x18<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x19<<8)                  |(1<<CFlag)
-         .hword  (0x20<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x21<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x22<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x23<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x24<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x25<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x20<<8)                  |(1<<CFlag)
-         .hword  (0x21<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x22<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x23<<8)                  |(1<<CFlag)
-         .hword  (0x24<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x25<<8)                  |(1<<CFlag)
-         .hword  (0x26<<8)                  |(1<<CFlag)
-         .hword  (0x27<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x28<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x29<<8)               |(1<<CFlag)
-         .hword  (0x30<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x31<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x32<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x33<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x34<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x35<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x30<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x31<<8)                  |(1<<CFlag)
-         .hword  (0x32<<8)                  |(1<<CFlag)
-         .hword  (0x33<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x34<<8)                  |(1<<CFlag)
-         .hword  (0x35<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x37<<8)                  |(1<<CFlag)
-         .hword  (0x38<<8)               |(1<<CFlag)
-         .hword  (0x39<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x40<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x41<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x42<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x43<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x44<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x45<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x40<<8)                     |(1<<CFlag)
-         .hword  (0x41<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x42<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x43<<8)                     |(1<<CFlag)
-         .hword  (0x44<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x45<<8)                     |(1<<CFlag)
-         .hword  (0x46<<8)                     |(1<<CFlag)
-         .hword  (0x47<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x49<<8)                  |(1<<CFlag)
-         .hword  (0x50<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x51<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x52<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x53<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x54<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x55<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x50<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x51<<8)                     |(1<<CFlag)
-         .hword  (0x52<<8)                     |(1<<CFlag)
-         .hword  (0x53<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x54<<8)                     |(1<<CFlag)
-         .hword  (0x55<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x57<<8)                     |(1<<CFlag)
-         .hword  (0x58<<8)                  |(1<<CFlag)
-         .hword  (0x59<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x60<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x61<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x62<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x63<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x64<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x65<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x60<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x61<<8)                  |(1<<CFlag)
-         .hword  (0x62<<8)                  |(1<<CFlag)
-         .hword  (0x63<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x64<<8)                  |(1<<CFlag)
-         .hword  (0x65<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x66<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x67<<8)                  |(1<<CFlag)
-         .hword  (0x68<<8)               |(1<<CFlag)
-         .hword  (0x69<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x70<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x71<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x72<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x73<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x74<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x75<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x70<<8)                  |(1<<CFlag)
-         .hword  (0x71<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x72<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x73<<8)                  |(1<<CFlag)
-         .hword  (0x74<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x75<<8)                  |(1<<CFlag)
-         .hword  (0x76<<8)                  |(1<<CFlag)
-         .hword  (0x77<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x78<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x79<<8)               |(1<<CFlag)
-         .hword  (0x80<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x81<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x82<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x83<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x84<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x85<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x80<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0x81<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x82<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x83<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x85<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0x86<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x89<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0x90<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x91<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x92<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x93<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x94<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x95<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x90<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x91<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0x92<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0x93<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x94<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0x95<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x97<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0x98<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA0<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA1<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xA2<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xA3<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA4<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xA5<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA0<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA1<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xA2<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xA3<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA4<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xA5<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA6<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA7<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xA8<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xA9<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB0<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xB1<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB2<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB3<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xB4<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB5<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xB0<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xB1<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB2<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB3<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xB4<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB5<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xB6<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xB7<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB8<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB9<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xC0<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC1<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xC2<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xC3<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC4<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xC5<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC0<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC1<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0xC2<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0xC3<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC4<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0xC5<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC6<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC7<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0xC8<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xC9<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD0<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xD1<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD2<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD3<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xD4<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD5<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xD0<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0xD1<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD2<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD3<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0xD4<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD5<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0xD6<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0xD7<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD8<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD9<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xE0<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xE1<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE2<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE3<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xE4<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE5<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xE0<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xE1<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE2<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE3<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xE4<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE5<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xE6<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xE7<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE8<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE9<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xF0<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF1<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xF2<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xF3<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF4<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xF5<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF0<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF1<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xF2<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xF3<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF4<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xF5<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF6<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF7<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xF8<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xF9<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x00<<8)   |(1<<ZFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x01<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x02<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x03<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x04<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x05<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x00<<8)   |(1<<ZFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x01<<8)                     |(1<<CFlag)
-         .hword  (0x02<<8)                     |(1<<CFlag)
-         .hword  (0x03<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x04<<8)                     |(1<<CFlag)
-         .hword  (0x05<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x06<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x07<<8)                     |(1<<CFlag)
-         .hword  (0x08<<8)                  |(1<<CFlag)
-         .hword  (0x09<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x10<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x11<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x12<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x13<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x14<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x15<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x10<<8)                     |(1<<CFlag)
-         .hword  (0x11<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x12<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x13<<8)                     |(1<<CFlag)
-         .hword  (0x14<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x15<<8)                     |(1<<CFlag)
-         .hword  (0x16<<8)                     |(1<<CFlag)
-         .hword  (0x17<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x18<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x19<<8)                  |(1<<CFlag)
-         .hword  (0x20<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x21<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x22<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x23<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x24<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x25<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x20<<8)                  |(1<<CFlag)
-         .hword  (0x21<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x22<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x23<<8)                  |(1<<CFlag)
-         .hword  (0x24<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x25<<8)                  |(1<<CFlag)
-         .hword  (0x26<<8)                  |(1<<CFlag)
-         .hword  (0x27<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x28<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x29<<8)               |(1<<CFlag)
-         .hword  (0x30<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x31<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x32<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x33<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x34<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x35<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x30<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x31<<8)                  |(1<<CFlag)
-         .hword  (0x32<<8)                  |(1<<CFlag)
-         .hword  (0x33<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x34<<8)                  |(1<<CFlag)
-         .hword  (0x35<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x37<<8)                  |(1<<CFlag)
-         .hword  (0x38<<8)               |(1<<CFlag)
-         .hword  (0x39<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x40<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x41<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x42<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x43<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x44<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x45<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x40<<8)                     |(1<<CFlag)
-         .hword  (0x41<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x42<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x43<<8)                     |(1<<CFlag)
-         .hword  (0x44<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x45<<8)                     |(1<<CFlag)
-         .hword  (0x46<<8)                     |(1<<CFlag)
-         .hword  (0x47<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x49<<8)                  |(1<<CFlag)
-         .hword  (0x50<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x51<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x52<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x53<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x54<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x55<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x50<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x51<<8)                     |(1<<CFlag)
-         .hword  (0x52<<8)                     |(1<<CFlag)
-         .hword  (0x53<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x54<<8)                     |(1<<CFlag)
-         .hword  (0x55<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x57<<8)                     |(1<<CFlag)
-         .hword  (0x58<<8)                  |(1<<CFlag)
-         .hword  (0x59<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x60<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x61<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x62<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x63<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x64<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x65<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x06<<8)               |(1<<VFlag)
-         .hword  (0x07<<8)                  
-         .hword  (0x08<<8)               
-         .hword  (0x09<<8)            |(1<<VFlag)
-         .hword  (0x0A<<8)            |(1<<VFlag)
-         .hword  (0x0B<<8)               
-         .hword  (0x0C<<8)            |(1<<VFlag)
-         .hword  (0x0D<<8)               
-         .hword  (0x0E<<8)               
-         .hword  (0x0F<<8)            |(1<<VFlag)
-         .hword  (0x10<<8)         |(1<<HFlag)      
-         .hword  (0x11<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x12<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x13<<8)         |(1<<HFlag)      
-         .hword  (0x14<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x15<<8)         |(1<<HFlag)      
-         .hword  (0x16<<8)                  
-         .hword  (0x17<<8)               |(1<<VFlag)
-         .hword  (0x18<<8)            |(1<<VFlag)
-         .hword  (0x19<<8)               
-         .hword  (0x1A<<8)               
-         .hword  (0x1B<<8)            |(1<<VFlag)
-         .hword  (0x1C<<8)               
-         .hword  (0x1D<<8)            |(1<<VFlag)
-         .hword  (0x1E<<8)            |(1<<VFlag)
-         .hword  (0x1F<<8)               
-         .hword  (0x20<<8)      |(1<<HFlag)      
-         .hword  (0x21<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x22<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x23<<8)      |(1<<HFlag)      
-         .hword  (0x24<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x25<<8)      |(1<<HFlag)      
-         .hword  (0x26<<8)               
-         .hword  (0x27<<8)            |(1<<VFlag)
-         .hword  (0x28<<8)         |(1<<VFlag)
-         .hword  (0x29<<8)            
-         .hword  (0x2A<<8)            
-         .hword  (0x2B<<8)         |(1<<VFlag)
-         .hword  (0x2C<<8)            
-         .hword  (0x2D<<8)         |(1<<VFlag)
-         .hword  (0x2E<<8)         |(1<<VFlag)
-         .hword  (0x2F<<8)            
-         .hword  (0x30<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x31<<8)      |(1<<HFlag)      
-         .hword  (0x32<<8)      |(1<<HFlag)      
-         .hword  (0x33<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x34<<8)      |(1<<HFlag)      
-         .hword  (0x35<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)
-         .hword  (0x37<<8)               
-         .hword  (0x38<<8)            
-         .hword  (0x39<<8)         |(1<<VFlag)
-         .hword  (0x3A<<8)         |(1<<VFlag)
-         .hword  (0x3B<<8)            
-         .hword  (0x3C<<8)         |(1<<VFlag)
-         .hword  (0x3D<<8)            
-         .hword  (0x3E<<8)            
-         .hword  (0x3F<<8)         |(1<<VFlag)
-         .hword  (0x40<<8)         |(1<<HFlag)      
-         .hword  (0x41<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x42<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x43<<8)         |(1<<HFlag)      
-         .hword  (0x44<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x45<<8)         |(1<<HFlag)      
-         .hword  (0x46<<8)                  
-         .hword  (0x47<<8)               |(1<<VFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)
-         .hword  (0x49<<8)               
-         .hword  (0x4A<<8)               
-         .hword  (0x4B<<8)            |(1<<VFlag)
-         .hword  (0x4C<<8)               
-         .hword  (0x4D<<8)            |(1<<VFlag)
-         .hword  (0x4E<<8)            |(1<<VFlag)
-         .hword  (0x4F<<8)               
-         .hword  (0x50<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x51<<8)         |(1<<HFlag)      
-         .hword  (0x52<<8)         |(1<<HFlag)      
-         .hword  (0x53<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x54<<8)         |(1<<HFlag)      
-         .hword  (0x55<<8)         |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)
-         .hword  (0x57<<8)                  
-         .hword  (0x58<<8)               
-         .hword  (0x59<<8)            |(1<<VFlag)
-         .hword  (0x5A<<8)            |(1<<VFlag)
-         .hword  (0x5B<<8)               
-         .hword  (0x5C<<8)            |(1<<VFlag)
-         .hword  (0x5D<<8)               
-         .hword  (0x5E<<8)               
-         .hword  (0x5F<<8)            |(1<<VFlag)
-         .hword  (0x60<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x61<<8)      |(1<<HFlag)      
-         .hword  (0x62<<8)      |(1<<HFlag)      
-         .hword  (0x63<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x64<<8)      |(1<<HFlag)      
-         .hword  (0x65<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x66<<8)            |(1<<VFlag)
-         .hword  (0x67<<8)               
-         .hword  (0x68<<8)            
-         .hword  (0x69<<8)         |(1<<VFlag)
-         .hword  (0x6A<<8)         |(1<<VFlag)
-         .hword  (0x6B<<8)            
-         .hword  (0x6C<<8)         |(1<<VFlag)
-         .hword  (0x6D<<8)            
-         .hword  (0x6E<<8)            
-         .hword  (0x6F<<8)         |(1<<VFlag)
-         .hword  (0x70<<8)      |(1<<HFlag)      
-         .hword  (0x71<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x72<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x73<<8)      |(1<<HFlag)      
-         .hword  (0x74<<8)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x75<<8)      |(1<<HFlag)      
-         .hword  (0x76<<8)               
-         .hword  (0x77<<8)            |(1<<VFlag)
-         .hword  (0x78<<8)         |(1<<VFlag)
-         .hword  (0x79<<8)            
-         .hword  (0x7A<<8)            
-         .hword  (0x7B<<8)         |(1<<VFlag)
-         .hword  (0x7C<<8)            
-         .hword  (0x7D<<8)         |(1<<VFlag)
-         .hword  (0x7E<<8)         |(1<<VFlag)
-         .hword  (0x7F<<8)            
-         .hword  (0x80<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x81<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x82<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x83<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x84<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x85<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x86<<8)|(1<<SFlag)               
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)
-         .hword  (0x89<<8)|(1<<SFlag)            
-         .hword  (0x8A<<8)|(1<<SFlag)            
-         .hword  (0x8B<<8)|(1<<SFlag)         |(1<<VFlag)
-         .hword  (0x8C<<8)|(1<<SFlag)            
-         .hword  (0x8D<<8)|(1<<SFlag)         |(1<<VFlag)
-         .hword  (0x8E<<8)|(1<<SFlag)         |(1<<VFlag)
-         .hword  (0x8F<<8)|(1<<SFlag)            
-         .hword  (0x90<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x91<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x92<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x93<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x94<<8)|(1<<SFlag)      |(1<<HFlag)      
-         .hword  (0x95<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)
-         .hword  (0x97<<8)|(1<<SFlag)               
-         .hword  (0x98<<8)|(1<<SFlag)            
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)
-         .hword  (0x9A<<8)|(1<<SFlag)         |(1<<VFlag)
-         .hword  (0x9B<<8)|(1<<SFlag)            
-         .hword  (0x9C<<8)|(1<<SFlag)         |(1<<VFlag)
-         .hword  (0x9D<<8)|(1<<SFlag)            
-         .hword  (0x9E<<8)|(1<<SFlag)            
-         .hword  (0x9F<<8)|(1<<SFlag)         |(1<<VFlag)
-         .hword  (0x00<<8)   |(1<<ZFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x01<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x02<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x03<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x04<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x05<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x06<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x07<<8)                     |(1<<CFlag)
-         .hword  (0x08<<8)                  |(1<<CFlag)
-         .hword  (0x09<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x0A<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x0B<<8)                  |(1<<CFlag)
-         .hword  (0x0C<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x0D<<8)                  |(1<<CFlag)
-         .hword  (0x0E<<8)                  |(1<<CFlag)
-         .hword  (0x0F<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x10<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x11<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x12<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x13<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x14<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x15<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x16<<8)                     |(1<<CFlag)
-         .hword  (0x17<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x18<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x19<<8)                  |(1<<CFlag)
-         .hword  (0x1A<<8)                  |(1<<CFlag)
-         .hword  (0x1B<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x1C<<8)                  |(1<<CFlag)
-         .hword  (0x1D<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x1E<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x1F<<8)                  |(1<<CFlag)
-         .hword  (0x20<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x21<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x22<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x23<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x24<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x25<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x26<<8)                  |(1<<CFlag)
-         .hword  (0x27<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x28<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x29<<8)               |(1<<CFlag)
-         .hword  (0x2A<<8)               |(1<<CFlag)
-         .hword  (0x2B<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x2C<<8)               |(1<<CFlag)
-         .hword  (0x2D<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x2E<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x2F<<8)               |(1<<CFlag)
-         .hword  (0x30<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x31<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x32<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x33<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x34<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x35<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x37<<8)                  |(1<<CFlag)
-         .hword  (0x38<<8)               |(1<<CFlag)
-         .hword  (0x39<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x3A<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x3B<<8)               |(1<<CFlag)
-         .hword  (0x3C<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x3D<<8)               |(1<<CFlag)
-         .hword  (0x3E<<8)               |(1<<CFlag)
-         .hword  (0x3F<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x40<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x41<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x42<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x43<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x44<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x45<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x46<<8)                     |(1<<CFlag)
-         .hword  (0x47<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x49<<8)                  |(1<<CFlag)
-         .hword  (0x4A<<8)                  |(1<<CFlag)
-         .hword  (0x4B<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x4C<<8)                  |(1<<CFlag)
-         .hword  (0x4D<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x4E<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x4F<<8)                  |(1<<CFlag)
-         .hword  (0x50<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x51<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x52<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x53<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x54<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x55<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x57<<8)                     |(1<<CFlag)
-         .hword  (0x58<<8)                  |(1<<CFlag)
-         .hword  (0x59<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x5A<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x5B<<8)                  |(1<<CFlag)
-         .hword  (0x5C<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x5D<<8)                  |(1<<CFlag)
-         .hword  (0x5E<<8)                  |(1<<CFlag)
-         .hword  (0x5F<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x60<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x61<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x62<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x63<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x64<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x65<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x66<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x67<<8)                  |(1<<CFlag)
-         .hword  (0x68<<8)               |(1<<CFlag)
-         .hword  (0x69<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x6A<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x6B<<8)               |(1<<CFlag)
-         .hword  (0x6C<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x6D<<8)               |(1<<CFlag)
-         .hword  (0x6E<<8)               |(1<<CFlag)
-         .hword  (0x6F<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x70<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x71<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x72<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x73<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x74<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x75<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x76<<8)                  |(1<<CFlag)
-         .hword  (0x77<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x78<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x79<<8)               |(1<<CFlag)
-         .hword  (0x7A<<8)               |(1<<CFlag)
-         .hword  (0x7B<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x7C<<8)               |(1<<CFlag)
-         .hword  (0x7D<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x7E<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x7F<<8)               |(1<<CFlag)
-         .hword  (0x80<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x81<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x82<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x83<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x84<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x85<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x86<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x89<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0x8A<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0x8B<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x8C<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0x8D<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x8E<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x8F<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0x90<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x91<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x92<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x93<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x94<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x95<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x97<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0x98<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x9A<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x9B<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0x9C<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x9D<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0x9E<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0x9F<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA0<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA1<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xA2<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xA3<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA4<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xA5<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA6<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xA7<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xA8<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xA9<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xAA<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xAB<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xAC<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xAD<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xAE<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xAF<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB0<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xB1<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB2<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB3<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xB4<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB5<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xB6<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xB7<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB8<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xB9<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xBA<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xBB<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xBC<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xBD<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xBE<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xBF<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xC0<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC1<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xC2<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xC3<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC4<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xC5<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC6<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xC7<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0xC8<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xC9<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xCA<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xCB<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xCC<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xCD<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xCE<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xCF<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD0<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xD1<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD2<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD3<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xD4<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD5<<8)|(1<<SFlag)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xD6<<8)|(1<<SFlag)                  |(1<<CFlag)
-         .hword  (0xD7<<8)|(1<<SFlag)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD8<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xD9<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xDA<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xDB<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xDC<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xDD<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xDE<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xDF<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xE0<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xE1<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE2<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE3<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xE4<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE5<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xE6<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xE7<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE8<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xE9<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xEA<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xEB<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xEC<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xED<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xEE<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xEF<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xF0<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF1<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xF2<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xF3<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF4<<8)|(1<<SFlag)   |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0xF5<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF6<<8)|(1<<SFlag)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xF7<<8)|(1<<SFlag)               |(1<<CFlag)
-         .hword  (0xF8<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xF9<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xFA<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xFB<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xFC<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0xFD<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xFE<<8)|(1<<SFlag)            |(1<<CFlag)
-         .hword  (0xFF<<8)|(1<<SFlag)      |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x00<<8)   |(1<<ZFlag)   |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x01<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x02<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x03<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x04<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x05<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x06<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x07<<8)                     |(1<<CFlag)
-         .hword  (0x08<<8)                  |(1<<CFlag)
-         .hword  (0x09<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x0A<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x0B<<8)                  |(1<<CFlag)
-         .hword  (0x0C<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x0D<<8)                  |(1<<CFlag)
-         .hword  (0x0E<<8)                  |(1<<CFlag)
-         .hword  (0x0F<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x10<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x11<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x12<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x13<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x14<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x15<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x16<<8)                     |(1<<CFlag)
-         .hword  (0x17<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x18<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x19<<8)                  |(1<<CFlag)
-         .hword  (0x1A<<8)                  |(1<<CFlag)
-         .hword  (0x1B<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x1C<<8)                  |(1<<CFlag)
-         .hword  (0x1D<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x1E<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x1F<<8)                  |(1<<CFlag)
-         .hword  (0x20<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x21<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x22<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x23<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x24<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x25<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x26<<8)                  |(1<<CFlag)
-         .hword  (0x27<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x28<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x29<<8)               |(1<<CFlag)
-         .hword  (0x2A<<8)               |(1<<CFlag)
-         .hword  (0x2B<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x2C<<8)               |(1<<CFlag)
-         .hword  (0x2D<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x2E<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x2F<<8)               |(1<<CFlag)
-         .hword  (0x30<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x31<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x32<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x33<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x34<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x35<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x37<<8)                  |(1<<CFlag)
-         .hword  (0x38<<8)               |(1<<CFlag)
-         .hword  (0x39<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x3A<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x3B<<8)               |(1<<CFlag)
-         .hword  (0x3C<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x3D<<8)               |(1<<CFlag)
-         .hword  (0x3E<<8)               |(1<<CFlag)
-         .hword  (0x3F<<8)         |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x40<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x41<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x42<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x43<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x44<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x45<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x46<<8)                     |(1<<CFlag)
-         .hword  (0x47<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x49<<8)                  |(1<<CFlag)
-         .hword  (0x4A<<8)                  |(1<<CFlag)
-         .hword  (0x4B<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x4C<<8)                  |(1<<CFlag)
-         .hword  (0x4D<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x4E<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x4F<<8)                  |(1<<CFlag)
-         .hword  (0x50<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x51<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x52<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x53<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x54<<8)         |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x55<<8)         |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x57<<8)                     |(1<<CFlag)
-         .hword  (0x58<<8)                  |(1<<CFlag)
-         .hword  (0x59<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x5A<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x5B<<8)                  |(1<<CFlag)
-         .hword  (0x5C<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x5D<<8)                  |(1<<CFlag)
-         .hword  (0x5E<<8)                  |(1<<CFlag)
-         .hword  (0x5F<<8)            |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x60<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x61<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x62<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x63<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x64<<8)      |(1<<HFlag)         |(1<<CFlag)
-         .hword  (0x65<<8)      |(1<<HFlag)   |(1<<VFlag)   |(1<<CFlag)
-         .hword  (0x00<<8)   |(1<<ZFlag)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x01<<8)                  |(1<<NFlag)   
-         .hword  (0x02<<8)                  |(1<<NFlag)   
-         .hword  (0x03<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x04<<8)                  |(1<<NFlag)   
-         .hword  (0x05<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x06<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x07<<8)                  |(1<<NFlag)   
-         .hword  (0x08<<8)               |(1<<NFlag)   
-         .hword  (0x09<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x04<<8)                  |(1<<NFlag)   
-         .hword  (0x05<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x06<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x07<<8)                  |(1<<NFlag)   
-         .hword  (0x08<<8)               |(1<<NFlag)   
-         .hword  (0x09<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x10<<8)                  |(1<<NFlag)   
-         .hword  (0x11<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x12<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x13<<8)                  |(1<<NFlag)   
-         .hword  (0x14<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x15<<8)                  |(1<<NFlag)   
-         .hword  (0x16<<8)                  |(1<<NFlag)   
-         .hword  (0x17<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x18<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x19<<8)               |(1<<NFlag)   
-         .hword  (0x14<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x15<<8)                  |(1<<NFlag)   
-         .hword  (0x16<<8)                  |(1<<NFlag)   
-         .hword  (0x17<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x18<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x19<<8)               |(1<<NFlag)   
-         .hword  (0x20<<8)               |(1<<NFlag)   
-         .hword  (0x21<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x22<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x23<<8)               |(1<<NFlag)   
-         .hword  (0x24<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x25<<8)               |(1<<NFlag)   
-         .hword  (0x26<<8)               |(1<<NFlag)   
-         .hword  (0x27<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x28<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x29<<8)            |(1<<NFlag)   
-         .hword  (0x24<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x25<<8)               |(1<<NFlag)   
-         .hword  (0x26<<8)               |(1<<NFlag)   
-         .hword  (0x27<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x28<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x29<<8)            |(1<<NFlag)   
-         .hword  (0x30<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x31<<8)               |(1<<NFlag)   
-         .hword  (0x32<<8)               |(1<<NFlag)   
-         .hword  (0x33<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x34<<8)               |(1<<NFlag)   
-         .hword  (0x35<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x36<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x37<<8)               |(1<<NFlag)   
-         .hword  (0x38<<8)            |(1<<NFlag)   
-         .hword  (0x39<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x34<<8)               |(1<<NFlag)   
-         .hword  (0x35<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x36<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x37<<8)               |(1<<NFlag)   
-         .hword  (0x38<<8)            |(1<<NFlag)   
-         .hword  (0x39<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x40<<8)                  |(1<<NFlag)   
-         .hword  (0x41<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x42<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x43<<8)                  |(1<<NFlag)   
-         .hword  (0x44<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x45<<8)                  |(1<<NFlag)   
-         .hword  (0x46<<8)                  |(1<<NFlag)   
-         .hword  (0x47<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x48<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x49<<8)               |(1<<NFlag)   
-         .hword  (0x44<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x45<<8)                  |(1<<NFlag)   
-         .hword  (0x46<<8)                  |(1<<NFlag)   
-         .hword  (0x47<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x48<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x49<<8)               |(1<<NFlag)   
-         .hword  (0x50<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x51<<8)                  |(1<<NFlag)   
-         .hword  (0x52<<8)                  |(1<<NFlag)   
-         .hword  (0x53<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x54<<8)                  |(1<<NFlag)   
-         .hword  (0x55<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x56<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x57<<8)                  |(1<<NFlag)   
-         .hword  (0x58<<8)               |(1<<NFlag)   
-         .hword  (0x59<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x54<<8)                  |(1<<NFlag)   
-         .hword  (0x55<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x56<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x57<<8)                  |(1<<NFlag)   
-         .hword  (0x58<<8)               |(1<<NFlag)   
-         .hword  (0x59<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x60<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x61<<8)               |(1<<NFlag)   
-         .hword  (0x62<<8)               |(1<<NFlag)   
-         .hword  (0x63<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x64<<8)               |(1<<NFlag)   
-         .hword  (0x65<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x66<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x67<<8)               |(1<<NFlag)   
-         .hword  (0x68<<8)            |(1<<NFlag)   
-         .hword  (0x69<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x64<<8)               |(1<<NFlag)   
-         .hword  (0x65<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x66<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x67<<8)               |(1<<NFlag)   
-         .hword  (0x68<<8)            |(1<<NFlag)   
-         .hword  (0x69<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x70<<8)               |(1<<NFlag)   
-         .hword  (0x71<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x72<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x73<<8)               |(1<<NFlag)   
-         .hword  (0x74<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x75<<8)               |(1<<NFlag)   
-         .hword  (0x76<<8)               |(1<<NFlag)   
-         .hword  (0x77<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x78<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x79<<8)            |(1<<NFlag)   
-         .hword  (0x74<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x75<<8)               |(1<<NFlag)   
-         .hword  (0x76<<8)               |(1<<NFlag)   
-         .hword  (0x77<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x78<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x79<<8)            |(1<<NFlag)   
-         .hword  (0x80<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x81<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x82<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x83<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x85<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x86<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x89<<8)|(1<<SFlag)            |(1<<NFlag)   
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x85<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x86<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x89<<8)|(1<<SFlag)            |(1<<NFlag)   
-         .hword  (0x90<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x91<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x92<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x93<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x94<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x95<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x97<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x98<<8)|(1<<SFlag)            |(1<<NFlag)   
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x34<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x35<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x37<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x38<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x39<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x40<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x41<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x42<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x43<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x44<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x45<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x46<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x47<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x49<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x44<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x45<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x46<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x47<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x49<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x50<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x51<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x52<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x53<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x54<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x55<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x57<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x58<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x59<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x54<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x55<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x57<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x58<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x59<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x60<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x61<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x62<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x63<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x64<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x65<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x66<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x67<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x68<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x69<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x64<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x65<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x66<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x67<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x68<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x69<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x70<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x71<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x72<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x73<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x74<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x75<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x76<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x77<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x78<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x79<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x74<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x75<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x76<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x77<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x78<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x79<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x80<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x81<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x82<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x83<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x85<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x86<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x89<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x85<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x86<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x89<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x90<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x91<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x92<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x93<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x94<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x95<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x97<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x98<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x94<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x95<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x97<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x98<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA0<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA1<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA2<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA3<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA4<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA5<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA6<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA7<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA8<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA9<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA4<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA5<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA6<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA7<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA8<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA9<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB0<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB1<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB2<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB3<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB4<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB5<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB6<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB7<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB8<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB9<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB4<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB5<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB6<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB7<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB8<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB9<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC0<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC1<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC2<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC3<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC4<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC5<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC6<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC7<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC8<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC9<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC4<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC5<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC6<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC7<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC8<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC9<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD0<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD1<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD2<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD3<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD4<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD5<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD6<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD7<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD8<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD9<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD4<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD5<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD6<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD7<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD8<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD9<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE0<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE1<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE2<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE3<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE4<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE5<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE6<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE7<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE8<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE9<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE4<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE5<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE6<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE7<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE8<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE9<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF0<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF1<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF2<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF3<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF4<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF5<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF6<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF7<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF8<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF9<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF4<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF5<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF6<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF7<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF8<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF9<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x00<<8)   |(1<<ZFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x01<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x02<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x03<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x04<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x05<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x06<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x07<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x08<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x09<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x04<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x05<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x06<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x07<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x08<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x09<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x10<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x11<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x12<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x13<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x14<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x15<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x16<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x17<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x18<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x19<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x14<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x15<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x16<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x17<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x18<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x19<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x20<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x21<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x22<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x23<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x24<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x25<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x26<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x27<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x28<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x29<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x24<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x25<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x26<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x27<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x28<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x29<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x30<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x31<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x32<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x33<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x34<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x35<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x37<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x38<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x39<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x34<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x35<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x37<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x38<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x39<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x40<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x41<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x42<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x43<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x44<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x45<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x46<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x47<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x49<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x44<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x45<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x46<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x47<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x49<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x50<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x51<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x52<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x53<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x54<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x55<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x57<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x58<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x59<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x54<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x55<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x57<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x58<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x59<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x60<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x61<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x62<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x63<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x64<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x65<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x66<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x67<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x68<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x69<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x64<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x65<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x66<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x67<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x68<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x69<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x70<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x71<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x72<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x73<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x74<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x75<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x76<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x77<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x78<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x79<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x74<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x75<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x76<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x77<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x78<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x79<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x80<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x81<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x82<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x83<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x85<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x86<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x89<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x85<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x86<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x89<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x90<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x91<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x92<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x93<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x94<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x95<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x97<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x98<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x94<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x95<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x97<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x98<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xFA<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0xFB<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0xFC<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0xFD<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0xFE<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0xFF<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x00<<8)   |(1<<ZFlag)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x01<<8)                  |(1<<NFlag)   
-         .hword  (0x02<<8)                  |(1<<NFlag)   
-         .hword  (0x03<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x04<<8)                  |(1<<NFlag)   
-         .hword  (0x05<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x06<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x07<<8)                  |(1<<NFlag)   
-         .hword  (0x08<<8)               |(1<<NFlag)   
-         .hword  (0x09<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x0A<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x0B<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x0C<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x0D<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x0E<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x0F<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x10<<8)                  |(1<<NFlag)   
-         .hword  (0x11<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x12<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x13<<8)                  |(1<<NFlag)   
-         .hword  (0x14<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x15<<8)                  |(1<<NFlag)   
-         .hword  (0x16<<8)                  |(1<<NFlag)   
-         .hword  (0x17<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x18<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x19<<8)               |(1<<NFlag)   
-         .hword  (0x1A<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x1B<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x1C<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x1D<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x1E<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x1F<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x20<<8)               |(1<<NFlag)   
-         .hword  (0x21<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x22<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x23<<8)               |(1<<NFlag)   
-         .hword  (0x24<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x25<<8)               |(1<<NFlag)   
-         .hword  (0x26<<8)               |(1<<NFlag)   
-         .hword  (0x27<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x28<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x29<<8)            |(1<<NFlag)   
-         .hword  (0x2A<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x2B<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x2C<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x2D<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x2E<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x2F<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x30<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x31<<8)               |(1<<NFlag)   
-         .hword  (0x32<<8)               |(1<<NFlag)   
-         .hword  (0x33<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x34<<8)               |(1<<NFlag)   
-         .hword  (0x35<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x36<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x37<<8)               |(1<<NFlag)   
-         .hword  (0x38<<8)            |(1<<NFlag)   
-         .hword  (0x39<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x3A<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x3B<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x3C<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x3D<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x3E<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x3F<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x40<<8)                  |(1<<NFlag)   
-         .hword  (0x41<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x42<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x43<<8)                  |(1<<NFlag)   
-         .hword  (0x44<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x45<<8)                  |(1<<NFlag)   
-         .hword  (0x46<<8)                  |(1<<NFlag)   
-         .hword  (0x47<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x48<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x49<<8)               |(1<<NFlag)   
-         .hword  (0x4A<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x4B<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x4C<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x4D<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x4E<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x4F<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x50<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x51<<8)                  |(1<<NFlag)   
-         .hword  (0x52<<8)                  |(1<<NFlag)   
-         .hword  (0x53<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x54<<8)                  |(1<<NFlag)   
-         .hword  (0x55<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x56<<8)               |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x57<<8)                  |(1<<NFlag)   
-         .hword  (0x58<<8)               |(1<<NFlag)   
-         .hword  (0x59<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x5A<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x5B<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x5C<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x5D<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x5E<<8)         |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x5F<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x60<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x61<<8)               |(1<<NFlag)   
-         .hword  (0x62<<8)               |(1<<NFlag)   
-         .hword  (0x63<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x64<<8)               |(1<<NFlag)   
-         .hword  (0x65<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x66<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x67<<8)               |(1<<NFlag)   
-         .hword  (0x68<<8)            |(1<<NFlag)   
-         .hword  (0x69<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x6A<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x6B<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x6C<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x6D<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x6E<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x6F<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x70<<8)               |(1<<NFlag)   
-         .hword  (0x71<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x72<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x73<<8)               |(1<<NFlag)   
-         .hword  (0x74<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x75<<8)               |(1<<NFlag)   
-         .hword  (0x76<<8)               |(1<<NFlag)   
-         .hword  (0x77<<8)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x78<<8)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x79<<8)            |(1<<NFlag)   
-         .hword  (0x7A<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x7B<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x7C<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x7D<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x7E<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x7F<<8)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x80<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x81<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x82<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x83<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x85<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x86<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x89<<8)|(1<<SFlag)            |(1<<NFlag)   
-         .hword  (0x8A<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x8B<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x8C<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x8D<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x8E<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x8F<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)   
-         .hword  (0x90<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x91<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x92<<8)|(1<<SFlag)               |(1<<NFlag)   
-         .hword  (0x93<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)   
-         .hword  (0x34<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x35<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x37<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x38<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x39<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3A<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3B<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3C<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3D<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3E<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3F<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x40<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x41<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x42<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x43<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x44<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x45<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x46<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x47<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x49<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4A<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4B<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4C<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4D<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4E<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4F<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x50<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x51<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x52<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x53<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x54<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x55<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x57<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x58<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x59<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5A<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5B<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5C<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5D<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5E<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5F<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x60<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x61<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x62<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x63<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x64<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x65<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x66<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x67<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x68<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x69<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6A<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6B<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6C<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6D<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6E<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6F<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x70<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x71<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x72<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x73<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x74<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x75<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x76<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x77<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x78<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x79<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7A<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7B<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7C<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7D<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7E<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7F<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x80<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x81<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x82<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x83<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x85<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x86<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x89<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8A<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8B<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8C<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8D<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8E<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8F<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x90<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x91<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x92<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x93<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x94<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x95<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x97<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x98<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x9A<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x9B<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x9C<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x9D<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x9E<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x9F<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA0<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA1<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA2<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA3<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA4<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA5<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA6<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA7<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA8<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xA9<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xAA<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xAB<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xAC<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xAD<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xAE<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xAF<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB0<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB1<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB2<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB3<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB4<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB5<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB6<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB7<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB8<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xB9<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xBA<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xBB<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xBC<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xBD<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xBE<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xBF<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC0<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC1<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC2<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC3<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC4<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC5<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC6<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC7<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC8<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xC9<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xCA<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xCB<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xCC<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xCD<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xCE<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xCF<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD0<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD1<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD2<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD3<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD4<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD5<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD6<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD7<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD8<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xD9<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xDA<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xDB<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xDC<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xDD<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xDE<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xDF<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE0<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE1<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE2<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE3<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE4<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE5<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE6<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE7<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE8<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xE9<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xEA<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xEB<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xEC<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xED<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xEE<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xEF<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF0<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF1<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF2<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF3<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF4<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF5<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF6<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF7<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF8<<8)|(1<<SFlag)         |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xF9<<8)|(1<<SFlag)      |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xFA<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xFB<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xFC<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0xFD<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xFE<<8)|(1<<SFlag)   |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0xFF<<8)|(1<<SFlag)   |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x00<<8)   |(1<<ZFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x01<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x02<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x03<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x04<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x05<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x06<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x07<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x08<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x09<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x0A<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x0B<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x0C<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x0D<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x0E<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x0F<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x10<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x11<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x12<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x13<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x14<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x15<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x16<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x17<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x18<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x19<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x1A<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x1B<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x1C<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x1D<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x1E<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x1F<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x20<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x21<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x22<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x23<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x24<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x25<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x26<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x27<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x28<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x29<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x2A<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x2B<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x2C<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x2D<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x2E<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x2F<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x30<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x31<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x32<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x33<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x34<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x35<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x36<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x37<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x38<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x39<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3A<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3B<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3C<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3D<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3E<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x3F<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x40<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x41<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x42<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x43<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x44<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x45<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x46<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x47<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x48<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x49<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4A<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4B<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4C<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4D<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4E<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x4F<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x50<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x51<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x52<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x53<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x54<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x55<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x56<<8)               |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x57<<8)                  |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x58<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x59<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5A<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5B<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5C<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5D<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5E<<8)         |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x5F<<8)         |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x60<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x61<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x62<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x63<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x64<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x65<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x66<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x67<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x68<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x69<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6A<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6B<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6C<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6D<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6E<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x6F<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x70<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x71<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x72<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x73<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x74<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x75<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x76<<8)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x77<<8)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x78<<8)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x79<<8)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7A<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7B<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7C<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7D<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7E<<8)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x7F<<8)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x80<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x81<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x82<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x83<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x84<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x85<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x86<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x87<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x88<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x89<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8A<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8B<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8C<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8D<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8E<<8)|(1<<SFlag)      |(1<<HFlag)|(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x8F<<8)|(1<<SFlag)      |(1<<HFlag)   |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x90<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x91<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x92<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x93<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x94<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x95<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x96<<8)|(1<<SFlag)            |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         .hword  (0x97<<8)|(1<<SFlag)               |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x98<<8)|(1<<SFlag)            |(1<<NFlag)|(1<<CFlag)
-         .hword  (0x99<<8)|(1<<SFlag)         |(1<<VFlag)|(1<<NFlag)|(1<<CFlag)
-         
-.align 4
-
-AF_Z80:  .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 0
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 1
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 2
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 3
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 4
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 5
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 6
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 7
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 8
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 9
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 10
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 11
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 12
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 13
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 14
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 15
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 16
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 17
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 18
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 19
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 20
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 21
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 22
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 23
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 24
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 25
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 26
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 27
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 28
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 29
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 30
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 31
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 32
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 33
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 34
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 35
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 36
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 37
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 38
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 39
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 40
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 41
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 42
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 43
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 44
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 45
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 46
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 47
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 48
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 49
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 50
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 51
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 52
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 53
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 54
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 55
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 56
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 57
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 58
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 59
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 60
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 61
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 62
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 63
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 64
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 65
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 66
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 67
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 68
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 69
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 70
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 71
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 72
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 73
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 74
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 75
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 76
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 77
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 78
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 79
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 80
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 81
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 82
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 83
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 84
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 85
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 86
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 87
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 88
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 89
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 90
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 91
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 92
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 93
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 94
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 95
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 96
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 97
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 98
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 99
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 100
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 101
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 102
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 103
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 104
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 105
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 106
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 107
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 108
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 109
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 110
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 111
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 112
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 113
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 114
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 115
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 116
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 117
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 118
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 119
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 120
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 121
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 122
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 123
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 124
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 125
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 126
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 127
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 128
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 129
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 130
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 131
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 132
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 133
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 134
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 135
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 136
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 137
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 138
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 139
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 140
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 141
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 142
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 143
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 144
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 145
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 146
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 147
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 148
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 149
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 150
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 151
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 152
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 153
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 154
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 155
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 156
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 157
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 158
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 159
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 160
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 161
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 162
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 163
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 164
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 165
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 166
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 167
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 168
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 169
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 170
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 171
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 172
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 173
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 174
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 175
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 176
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 177
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 178
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 179
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 180
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 181
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 182
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 183
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 184
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 185
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 186
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 187
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 188
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 189
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 190
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 191
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 192
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 193
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 194
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 195
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 196
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 197
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 198
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 199
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 200
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 201
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 202
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 203
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 204
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 205
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 206
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 207
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 208
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 209
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 210
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 211
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 212
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 213
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 214
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 215
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 216
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 217
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 218
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 219
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 220
-         .byte (0<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 221
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 222
-         .byte (1<<Z80_CFlag)|(0<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 223
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 224
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 225
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 226
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 227
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 228
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 229
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 230
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 231
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 232
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 233
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 234
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 235
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 236
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 237
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 238
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(0<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 239
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 240
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 241
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 242
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 243
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 244
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 245
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 246
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(0<<Z80_SFlag) ;@ 247
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 248
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 249
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 250
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(0<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 251
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 252
-         .byte (0<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 253
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(0<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 254
-         .byte (1<<Z80_CFlag)|(1<<Z80_NFlag)|(1<<Z80_VFlag)|(1<<Z80_HFlag)|(1<<Z80_ZFlag)|(1<<Z80_SFlag) ;@ 255
+DAATable:
+	.hword (0x00<<8)          |VBit               |ZBit
+	.hword (0x01<<8)
+	.hword (0x02<<8)
+	.hword (0x03<<8)          |VBit
+	.hword (0x04<<8)
+	.hword (0x05<<8)          |VBit
+	.hword (0x06<<8)          |VBit
+	.hword (0x07<<8)
+	.hword (0x08<<8)               |Bit3
+	.hword (0x09<<8)          |VBit|Bit3
+	.hword (0x10<<8)                    |HBit
+	.hword (0x11<<8)          |VBit     |HBit
+	.hword (0x12<<8)          |VBit     |HBit
+	.hword (0x13<<8)                    |HBit
+	.hword (0x14<<8)          |VBit     |HBit
+	.hword (0x15<<8)                    |HBit
+	.hword (0x10<<8)
+	.hword (0x11<<8)          |VBit
+	.hword (0x12<<8)          |VBit
+	.hword (0x13<<8)
+	.hword (0x14<<8)          |VBit
+	.hword (0x15<<8)
+	.hword (0x16<<8)
+	.hword (0x17<<8)          |VBit
+	.hword (0x18<<8)          |VBit|Bit3
+	.hword (0x19<<8)               |Bit3
+	.hword (0x20<<8)                    |HBit|Bit5
+	.hword (0x21<<8)          |VBit     |HBit|Bit5
+	.hword (0x22<<8)          |VBit     |HBit|Bit5
+	.hword (0x23<<8)                    |HBit|Bit5
+	.hword (0x24<<8)          |VBit     |HBit|Bit5
+	.hword (0x25<<8)                    |HBit|Bit5
+	.hword (0x20<<8)                         |Bit5
+	.hword (0x21<<8)          |VBit          |Bit5
+	.hword (0x22<<8)          |VBit          |Bit5
+	.hword (0x23<<8)                         |Bit5
+	.hword (0x24<<8)          |VBit          |Bit5
+	.hword (0x25<<8)                         |Bit5
+	.hword (0x26<<8)                         |Bit5
+	.hword (0x27<<8)          |VBit          |Bit5
+	.hword (0x28<<8)          |VBit|Bit3     |Bit5
+	.hword (0x29<<8)               |Bit3     |Bit5
+	.hword (0x30<<8)          |VBit     |HBit|Bit5
+	.hword (0x31<<8)                    |HBit|Bit5
+	.hword (0x32<<8)                    |HBit|Bit5
+	.hword (0x33<<8)          |VBit     |HBit|Bit5
+	.hword (0x34<<8)                    |HBit|Bit5
+	.hword (0x35<<8)          |VBit     |HBit|Bit5
+	.hword (0x30<<8)          |VBit          |Bit5
+	.hword (0x31<<8)                         |Bit5
+	.hword (0x32<<8)                         |Bit5
+	.hword (0x33<<8)          |VBit          |Bit5
+	.hword (0x34<<8)                         |Bit5
+	.hword (0x35<<8)          |VBit          |Bit5
+	.hword (0x36<<8)          |VBit          |Bit5
+	.hword (0x37<<8)                         |Bit5
+	.hword (0x38<<8)               |Bit3     |Bit5
+	.hword (0x39<<8)          |VBit|Bit3     |Bit5
+	.hword (0x40<<8)                    |HBit
+	.hword (0x41<<8)          |VBit     |HBit
+	.hword (0x42<<8)          |VBit     |HBit
+	.hword (0x43<<8)                    |HBit
+	.hword (0x44<<8)          |VBit     |HBit
+	.hword (0x45<<8)                    |HBit
+	.hword (0x40<<8)
+	.hword (0x41<<8)          |VBit
+	.hword (0x42<<8)          |VBit
+	.hword (0x43<<8)
+	.hword (0x44<<8)          |VBit
+	.hword (0x45<<8)
+	.hword (0x46<<8)
+	.hword (0x47<<8)          |VBit
+	.hword (0x48<<8)          |VBit|Bit3
+	.hword (0x49<<8)               |Bit3
+	.hword (0x50<<8)          |VBit     |HBit
+	.hword (0x51<<8)                    |HBit
+	.hword (0x52<<8)                    |HBit
+	.hword (0x53<<8)          |VBit     |HBit
+	.hword (0x54<<8)                    |HBit
+	.hword (0x55<<8)          |VBit     |HBit
+	.hword (0x50<<8)          |VBit
+	.hword (0x51<<8)
+	.hword (0x52<<8)
+	.hword (0x53<<8)          |VBit
+	.hword (0x54<<8)
+	.hword (0x55<<8)          |VBit
+	.hword (0x56<<8)          |VBit
+	.hword (0x57<<8)
+	.hword (0x58<<8)               |Bit3
+	.hword (0x59<<8)          |VBit|Bit3
+	.hword (0x60<<8)          |VBit     |HBit|Bit5
+	.hword (0x61<<8)                    |HBit|Bit5
+	.hword (0x62<<8)                    |HBit|Bit5
+	.hword (0x63<<8)          |VBit     |HBit|Bit5
+	.hword (0x64<<8)                    |HBit|Bit5
+	.hword (0x65<<8)          |VBit     |HBit|Bit5
+	.hword (0x60<<8)          |VBit          |Bit5
+	.hword (0x61<<8)                         |Bit5
+	.hword (0x62<<8)                         |Bit5
+	.hword (0x63<<8)          |VBit          |Bit5
+	.hword (0x64<<8)                         |Bit5
+	.hword (0x65<<8)          |VBit          |Bit5
+	.hword (0x66<<8)          |VBit          |Bit5
+	.hword (0x67<<8)                         |Bit5
+	.hword (0x68<<8)               |Bit3     |Bit5
+	.hword (0x69<<8)          |VBit|Bit3     |Bit5
+	.hword (0x70<<8)                    |HBit|Bit5
+	.hword (0x71<<8)          |VBit     |HBit|Bit5
+	.hword (0x72<<8)          |VBit     |HBit|Bit5
+	.hword (0x73<<8)                    |HBit|Bit5
+	.hword (0x74<<8)          |VBit     |HBit|Bit5
+	.hword (0x75<<8)                    |HBit|Bit5
+	.hword (0x70<<8)                         |Bit5
+	.hword (0x71<<8)          |VBit          |Bit5
+	.hword (0x72<<8)          |VBit          |Bit5
+	.hword (0x73<<8)                         |Bit5
+	.hword (0x74<<8)          |VBit          |Bit5
+	.hword (0x75<<8)                         |Bit5
+	.hword (0x76<<8)                         |Bit5
+	.hword (0x77<<8)          |VBit          |Bit5
+	.hword (0x78<<8)          |VBit|Bit3     |Bit5
+	.hword (0x79<<8)               |Bit3     |Bit5
+	.hword (0x80<<8)                    |HBit          |SBit
+	.hword (0x81<<8)          |VBit     |HBit          |SBit
+	.hword (0x82<<8)          |VBit     |HBit          |SBit
+	.hword (0x83<<8)                    |HBit          |SBit
+	.hword (0x84<<8)          |VBit     |HBit          |SBit
+	.hword (0x85<<8)                    |HBit          |SBit
+	.hword (0x80<<8)                                   |SBit
+	.hword (0x81<<8)          |VBit                    |SBit
+	.hword (0x82<<8)          |VBit                    |SBit
+	.hword (0x83<<8)                                   |SBit
+	.hword (0x84<<8)          |VBit                    |SBit
+	.hword (0x85<<8)                                   |SBit
+	.hword (0x86<<8)                                   |SBit
+	.hword (0x87<<8)          |VBit                    |SBit
+	.hword (0x88<<8)          |VBit|Bit3               |SBit
+	.hword (0x89<<8)               |Bit3               |SBit
+	.hword (0x90<<8)          |VBit     |HBit          |SBit
+	.hword (0x91<<8)                    |HBit          |SBit
+	.hword (0x92<<8)                    |HBit          |SBit
+	.hword (0x93<<8)          |VBit     |HBit          |SBit
+	.hword (0x94<<8)                    |HBit          |SBit
+	.hword (0x95<<8)          |VBit     |HBit          |SBit
+	.hword (0x90<<8)          |VBit                    |SBit
+	.hword (0x91<<8)                                   |SBit
+	.hword (0x92<<8)                                   |SBit
+	.hword (0x93<<8)          |VBit                    |SBit
+	.hword (0x94<<8)                                   |SBit
+	.hword (0x95<<8)          |VBit                    |SBit
+	.hword (0x96<<8)          |VBit                    |SBit
+	.hword (0x97<<8)                                   |SBit
+	.hword (0x98<<8)               |Bit3               |SBit
+	.hword (0x99<<8)          |VBit|Bit3               |SBit
+	.hword (0x00<<8)|CBit     |VBit     |HBit     |ZBit
+	.hword (0x01<<8)|CBit               |HBit
+	.hword (0x02<<8)|CBit               |HBit
+	.hword (0x03<<8)|CBit     |VBit     |HBit
+	.hword (0x04<<8)|CBit               |HBit
+	.hword (0x05<<8)|CBit     |VBit     |HBit
+	.hword (0x00<<8)|CBit     |VBit               |ZBit
+	.hword (0x01<<8)|CBit
+	.hword (0x02<<8)|CBit
+	.hword (0x03<<8)|CBit     |VBit
+	.hword (0x04<<8)|CBit
+	.hword (0x05<<8)|CBit     |VBit
+	.hword (0x06<<8)|CBit     |VBit
+	.hword (0x07<<8)|CBit
+	.hword (0x08<<8)|CBit          |Bit3
+	.hword (0x09<<8)|CBit     |VBit|Bit3
+	.hword (0x10<<8)|CBit               |HBit
+	.hword (0x11<<8)|CBit     |VBit     |HBit
+	.hword (0x12<<8)|CBit     |VBit     |HBit
+	.hword (0x13<<8)|CBit               |HBit
+	.hword (0x14<<8)|CBit     |VBit     |HBit
+	.hword (0x15<<8)|CBit               |HBit
+	.hword (0x10<<8)|CBit
+	.hword (0x11<<8)|CBit     |VBit
+	.hword (0x12<<8)|CBit     |VBit
+	.hword (0x13<<8)|CBit
+	.hword (0x14<<8)|CBit     |VBit
+	.hword (0x15<<8)|CBit
+	.hword (0x16<<8)|CBit
+	.hword (0x17<<8)|CBit     |VBit
+	.hword (0x18<<8)|CBit     |VBit|Bit3
+	.hword (0x19<<8)|CBit          |Bit3
+	.hword (0x20<<8)|CBit               |HBit|Bit5
+	.hword (0x21<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x22<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x23<<8)|CBit               |HBit|Bit5
+	.hword (0x24<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x25<<8)|CBit               |HBit|Bit5
+	.hword (0x20<<8)|CBit                    |Bit5
+	.hword (0x21<<8)|CBit     |VBit          |Bit5
+	.hword (0x22<<8)|CBit     |VBit          |Bit5
+	.hword (0x23<<8)|CBit                    |Bit5
+	.hword (0x24<<8)|CBit     |VBit          |Bit5
+	.hword (0x25<<8)|CBit                    |Bit5
+	.hword (0x26<<8)|CBit                    |Bit5
+	.hword (0x27<<8)|CBit     |VBit          |Bit5
+	.hword (0x28<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x29<<8)|CBit          |Bit3     |Bit5
+	.hword (0x30<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x31<<8)|CBit               |HBit|Bit5
+	.hword (0x32<<8)|CBit               |HBit|Bit5
+	.hword (0x33<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x34<<8)|CBit               |HBit|Bit5
+	.hword (0x35<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x30<<8)|CBit     |VBit          |Bit5
+	.hword (0x31<<8)|CBit                    |Bit5
+	.hword (0x32<<8)|CBit                    |Bit5
+	.hword (0x33<<8)|CBit     |VBit          |Bit5
+	.hword (0x34<<8)|CBit                    |Bit5
+	.hword (0x35<<8)|CBit     |VBit          |Bit5
+	.hword (0x36<<8)|CBit     |VBit          |Bit5
+	.hword (0x37<<8)|CBit                    |Bit5
+	.hword (0x38<<8)|CBit          |Bit3     |Bit5
+	.hword (0x39<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x40<<8)|CBit               |HBit
+	.hword (0x41<<8)|CBit     |VBit     |HBit
+	.hword (0x42<<8)|CBit     |VBit     |HBit
+	.hword (0x43<<8)|CBit               |HBit
+	.hword (0x44<<8)|CBit     |VBit     |HBit
+	.hword (0x45<<8)|CBit               |HBit
+	.hword (0x40<<8)|CBit
+	.hword (0x41<<8)|CBit     |VBit
+	.hword (0x42<<8)|CBit     |VBit
+	.hword (0x43<<8)|CBit
+	.hword (0x44<<8)|CBit     |VBit
+	.hword (0x45<<8)|CBit
+	.hword (0x46<<8)|CBit
+	.hword (0x47<<8)|CBit     |VBit
+	.hword (0x48<<8)|CBit     |VBit|Bit3
+	.hword (0x49<<8)|CBit          |Bit3
+	.hword (0x50<<8)|CBit     |VBit     |HBit
+	.hword (0x51<<8)|CBit               |HBit
+	.hword (0x52<<8)|CBit               |HBit
+	.hword (0x53<<8)|CBit     |VBit     |HBit
+	.hword (0x54<<8)|CBit               |HBit
+	.hword (0x55<<8)|CBit     |VBit     |HBit
+	.hword (0x50<<8)|CBit     |VBit
+	.hword (0x51<<8)|CBit
+	.hword (0x52<<8)|CBit
+	.hword (0x53<<8)|CBit     |VBit
+	.hword (0x54<<8)|CBit
+	.hword (0x55<<8)|CBit     |VBit
+	.hword (0x56<<8)|CBit     |VBit
+	.hword (0x57<<8)|CBit
+	.hword (0x58<<8)|CBit          |Bit3
+	.hword (0x59<<8)|CBit     |VBit|Bit3
+	.hword (0x60<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x61<<8)|CBit               |HBit|Bit5
+	.hword (0x62<<8)|CBit               |HBit|Bit5
+	.hword (0x63<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x64<<8)|CBit               |HBit|Bit5
+	.hword (0x65<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x60<<8)|CBit     |VBit          |Bit5
+	.hword (0x61<<8)|CBit                    |Bit5
+	.hword (0x62<<8)|CBit                    |Bit5
+	.hword (0x63<<8)|CBit     |VBit          |Bit5
+	.hword (0x64<<8)|CBit                    |Bit5
+	.hword (0x65<<8)|CBit     |VBit          |Bit5
+	.hword (0x66<<8)|CBit     |VBit          |Bit5
+	.hword (0x67<<8)|CBit                    |Bit5
+	.hword (0x68<<8)|CBit          |Bit3     |Bit5
+	.hword (0x69<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x70<<8)|CBit               |HBit|Bit5
+	.hword (0x71<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x72<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x73<<8)|CBit               |HBit|Bit5
+	.hword (0x74<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x75<<8)|CBit               |HBit|Bit5
+	.hword (0x70<<8)|CBit                    |Bit5
+	.hword (0x71<<8)|CBit     |VBit          |Bit5
+	.hword (0x72<<8)|CBit     |VBit          |Bit5
+	.hword (0x73<<8)|CBit                    |Bit5
+	.hword (0x74<<8)|CBit     |VBit          |Bit5
+	.hword (0x75<<8)|CBit                    |Bit5
+	.hword (0x76<<8)|CBit                    |Bit5
+	.hword (0x77<<8)|CBit     |VBit          |Bit5
+	.hword (0x78<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x79<<8)|CBit          |Bit3     |Bit5
+	.hword (0x80<<8)|CBit               |HBit          |SBit
+	.hword (0x81<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x82<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x83<<8)|CBit               |HBit          |SBit
+	.hword (0x84<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x85<<8)|CBit               |HBit          |SBit
+	.hword (0x80<<8)|CBit                              |SBit
+	.hword (0x81<<8)|CBit     |VBit                    |SBit
+	.hword (0x82<<8)|CBit     |VBit                    |SBit
+	.hword (0x83<<8)|CBit                              |SBit
+	.hword (0x84<<8)|CBit     |VBit                    |SBit
+	.hword (0x85<<8)|CBit                              |SBit
+	.hword (0x86<<8)|CBit                              |SBit
+	.hword (0x87<<8)|CBit     |VBit                    |SBit
+	.hword (0x88<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0x89<<8)|CBit          |Bit3               |SBit
+	.hword (0x90<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x91<<8)|CBit               |HBit          |SBit
+	.hword (0x92<<8)|CBit               |HBit          |SBit
+	.hword (0x93<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x94<<8)|CBit               |HBit          |SBit
+	.hword (0x95<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x90<<8)|CBit     |VBit                    |SBit
+	.hword (0x91<<8)|CBit                              |SBit
+	.hword (0x92<<8)|CBit                              |SBit
+	.hword (0x93<<8)|CBit     |VBit                    |SBit
+	.hword (0x94<<8)|CBit                              |SBit
+	.hword (0x95<<8)|CBit     |VBit                    |SBit
+	.hword (0x96<<8)|CBit     |VBit                    |SBit
+	.hword (0x97<<8)|CBit                              |SBit
+	.hword (0x98<<8)|CBit          |Bit3               |SBit
+	.hword (0x99<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xa0<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xa1<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xa2<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xa3<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xa4<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xa5<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xa0<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xa1<<8)|CBit                    |Bit5     |SBit
+	.hword (0xa2<<8)|CBit                    |Bit5     |SBit
+	.hword (0xa3<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xa4<<8)|CBit                    |Bit5     |SBit
+	.hword (0xa5<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xa6<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xa7<<8)|CBit                    |Bit5     |SBit
+	.hword (0xa8<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xa9<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xb0<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xb1<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xb2<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xb3<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xb4<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xb5<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xb0<<8)|CBit                    |Bit5     |SBit
+	.hword (0xb1<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xb2<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xb3<<8)|CBit                    |Bit5     |SBit
+	.hword (0xb4<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xb5<<8)|CBit                    |Bit5     |SBit
+	.hword (0xb6<<8)|CBit                    |Bit5     |SBit
+	.hword (0xb7<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xb8<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xb9<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xc0<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xc1<<8)|CBit               |HBit          |SBit
+	.hword (0xc2<<8)|CBit               |HBit          |SBit
+	.hword (0xc3<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xc4<<8)|CBit               |HBit          |SBit
+	.hword (0xc5<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xc0<<8)|CBit     |VBit                    |SBit
+	.hword (0xc1<<8)|CBit                              |SBit
+	.hword (0xc2<<8)|CBit                              |SBit
+	.hword (0xc3<<8)|CBit     |VBit                    |SBit
+	.hword (0xc4<<8)|CBit                              |SBit
+	.hword (0xc5<<8)|CBit     |VBit                    |SBit
+	.hword (0xc6<<8)|CBit     |VBit                    |SBit
+	.hword (0xc7<<8)|CBit                              |SBit
+	.hword (0xc8<<8)|CBit          |Bit3               |SBit
+	.hword (0xc9<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xd0<<8)|CBit               |HBit          |SBit
+	.hword (0xd1<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xd2<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xd3<<8)|CBit               |HBit          |SBit
+	.hword (0xd4<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xd5<<8)|CBit               |HBit          |SBit
+	.hword (0xd0<<8)|CBit                              |SBit
+	.hword (0xd1<<8)|CBit     |VBit                    |SBit
+	.hword (0xd2<<8)|CBit     |VBit                    |SBit
+	.hword (0xd3<<8)|CBit                              |SBit
+	.hword (0xd4<<8)|CBit     |VBit                    |SBit
+	.hword (0xd5<<8)|CBit                              |SBit
+	.hword (0xd6<<8)|CBit                              |SBit
+	.hword (0xd7<<8)|CBit     |VBit                    |SBit
+	.hword (0xd8<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xd9<<8)|CBit          |Bit3               |SBit
+	.hword (0xe0<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xe1<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xe2<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xe3<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xe4<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xe5<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xe0<<8)|CBit                    |Bit5     |SBit
+	.hword (0xe1<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xe2<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xe3<<8)|CBit                    |Bit5     |SBit
+	.hword (0xe4<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xe5<<8)|CBit                    |Bit5     |SBit
+	.hword (0xe6<<8)|CBit                    |Bit5     |SBit
+	.hword (0xe7<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xe8<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xe9<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xf0<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xf1<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xf2<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xf3<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xf4<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xf5<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xf0<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xf1<<8)|CBit                    |Bit5     |SBit
+	.hword (0xf2<<8)|CBit                    |Bit5     |SBit
+	.hword (0xf3<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xf4<<8)|CBit                    |Bit5     |SBit
+	.hword (0xf5<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xf6<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xf7<<8)|CBit                    |Bit5     |SBit
+	.hword (0xf8<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xf9<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0x00<<8)|CBit     |VBit     |HBit     |ZBit
+	.hword (0x01<<8)|CBit               |HBit
+	.hword (0x02<<8)|CBit               |HBit
+	.hword (0x03<<8)|CBit     |VBit     |HBit
+	.hword (0x04<<8)|CBit               |HBit
+	.hword (0x05<<8)|CBit     |VBit     |HBit
+	.hword (0x00<<8)|CBit     |VBit               |ZBit
+	.hword (0x01<<8)|CBit
+	.hword (0x02<<8)|CBit
+	.hword (0x03<<8)|CBit     |VBit
+	.hword (0x04<<8)|CBit
+	.hword (0x05<<8)|CBit     |VBit
+	.hword (0x06<<8)|CBit     |VBit
+	.hword (0x07<<8)|CBit
+	.hword (0x08<<8)|CBit          |Bit3
+	.hword (0x09<<8)|CBit     |VBit|Bit3
+	.hword (0x10<<8)|CBit               |HBit
+	.hword (0x11<<8)|CBit     |VBit     |HBit
+	.hword (0x12<<8)|CBit     |VBit     |HBit
+	.hword (0x13<<8)|CBit               |HBit
+	.hword (0x14<<8)|CBit     |VBit     |HBit
+	.hword (0x15<<8)|CBit               |HBit
+	.hword (0x10<<8)|CBit
+	.hword (0x11<<8)|CBit     |VBit
+	.hword (0x12<<8)|CBit     |VBit
+	.hword (0x13<<8)|CBit
+	.hword (0x14<<8)|CBit     |VBit
+	.hword (0x15<<8)|CBit
+	.hword (0x16<<8)|CBit
+	.hword (0x17<<8)|CBit     |VBit
+	.hword (0x18<<8)|CBit     |VBit|Bit3
+	.hword (0x19<<8)|CBit          |Bit3
+	.hword (0x20<<8)|CBit               |HBit|Bit5
+	.hword (0x21<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x22<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x23<<8)|CBit               |HBit|Bit5
+	.hword (0x24<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x25<<8)|CBit               |HBit|Bit5
+	.hword (0x20<<8)|CBit                    |Bit5
+	.hword (0x21<<8)|CBit     |VBit          |Bit5
+	.hword (0x22<<8)|CBit     |VBit          |Bit5
+	.hword (0x23<<8)|CBit                    |Bit5
+	.hword (0x24<<8)|CBit     |VBit          |Bit5
+	.hword (0x25<<8)|CBit                    |Bit5
+	.hword (0x26<<8)|CBit                    |Bit5
+	.hword (0x27<<8)|CBit     |VBit          |Bit5
+	.hword (0x28<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x29<<8)|CBit          |Bit3     |Bit5
+	.hword (0x30<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x31<<8)|CBit               |HBit|Bit5
+	.hword (0x32<<8)|CBit               |HBit|Bit5
+	.hword (0x33<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x34<<8)|CBit               |HBit|Bit5
+	.hword (0x35<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x30<<8)|CBit     |VBit          |Bit5
+	.hword (0x31<<8)|CBit                    |Bit5
+	.hword (0x32<<8)|CBit                    |Bit5
+	.hword (0x33<<8)|CBit     |VBit          |Bit5
+	.hword (0x34<<8)|CBit                    |Bit5
+	.hword (0x35<<8)|CBit     |VBit          |Bit5
+	.hword (0x36<<8)|CBit     |VBit          |Bit5
+	.hword (0x37<<8)|CBit                    |Bit5
+	.hword (0x38<<8)|CBit          |Bit3     |Bit5
+	.hword (0x39<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x40<<8)|CBit               |HBit
+	.hword (0x41<<8)|CBit     |VBit     |HBit
+	.hword (0x42<<8)|CBit     |VBit     |HBit
+	.hword (0x43<<8)|CBit               |HBit
+	.hword (0x44<<8)|CBit     |VBit     |HBit
+	.hword (0x45<<8)|CBit               |HBit
+	.hword (0x40<<8)|CBit
+	.hword (0x41<<8)|CBit     |VBit
+	.hword (0x42<<8)|CBit     |VBit
+	.hword (0x43<<8)|CBit
+	.hword (0x44<<8)|CBit     |VBit
+	.hword (0x45<<8)|CBit
+	.hword (0x46<<8)|CBit
+	.hword (0x47<<8)|CBit     |VBit
+	.hword (0x48<<8)|CBit     |VBit|Bit3
+	.hword (0x49<<8)|CBit          |Bit3
+	.hword (0x50<<8)|CBit     |VBit     |HBit
+	.hword (0x51<<8)|CBit               |HBit
+	.hword (0x52<<8)|CBit               |HBit
+	.hword (0x53<<8)|CBit     |VBit     |HBit
+	.hword (0x54<<8)|CBit               |HBit
+	.hword (0x55<<8)|CBit     |VBit     |HBit
+	.hword (0x50<<8)|CBit     |VBit
+	.hword (0x51<<8)|CBit
+	.hword (0x52<<8)|CBit
+	.hword (0x53<<8)|CBit     |VBit
+	.hword (0x54<<8)|CBit
+	.hword (0x55<<8)|CBit     |VBit
+	.hword (0x56<<8)|CBit     |VBit
+	.hword (0x57<<8)|CBit
+	.hword (0x58<<8)|CBit          |Bit3
+	.hword (0x59<<8)|CBit     |VBit|Bit3
+	.hword (0x60<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x61<<8)|CBit               |HBit|Bit5
+	.hword (0x62<<8)|CBit               |HBit|Bit5
+	.hword (0x63<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x64<<8)|CBit               |HBit|Bit5
+	.hword (0x65<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x06<<8)          |VBit
+	.hword (0x07<<8)
+	.hword (0x08<<8)               |Bit3
+	.hword (0x09<<8)          |VBit|Bit3
+	.hword (0x0a<<8)          |VBit|Bit3
+	.hword (0x0b<<8)               |Bit3
+	.hword (0x0c<<8)          |VBit|Bit3
+	.hword (0x0d<<8)               |Bit3
+	.hword (0x0e<<8)               |Bit3
+	.hword (0x0f<<8)          |VBit|Bit3
+	.hword (0x10<<8)                    |HBit
+	.hword (0x11<<8)          |VBit     |HBit
+	.hword (0x12<<8)          |VBit     |HBit
+	.hword (0x13<<8)                    |HBit
+	.hword (0x14<<8)          |VBit     |HBit
+	.hword (0x15<<8)                    |HBit
+	.hword (0x16<<8)
+	.hword (0x17<<8)          |VBit
+	.hword (0x18<<8)          |VBit|Bit3
+	.hword (0x19<<8)               |Bit3
+	.hword (0x1a<<8)               |Bit3
+	.hword (0x1b<<8)          |VBit|Bit3
+	.hword (0x1c<<8)               |Bit3
+	.hword (0x1d<<8)          |VBit|Bit3
+	.hword (0x1e<<8)          |VBit|Bit3
+	.hword (0x1f<<8)               |Bit3
+	.hword (0x20<<8)                    |HBit|Bit5
+	.hword (0x21<<8)          |VBit     |HBit|Bit5
+	.hword (0x22<<8)          |VBit     |HBit|Bit5
+	.hword (0x23<<8)                    |HBit|Bit5
+	.hword (0x24<<8)          |VBit     |HBit|Bit5
+	.hword (0x25<<8)                    |HBit|Bit5
+	.hword (0x26<<8)                         |Bit5
+	.hword (0x27<<8)          |VBit          |Bit5
+	.hword (0x28<<8)          |VBit|Bit3     |Bit5
+	.hword (0x29<<8)               |Bit3     |Bit5
+	.hword (0x2a<<8)               |Bit3     |Bit5
+	.hword (0x2b<<8)          |VBit|Bit3     |Bit5
+	.hword (0x2c<<8)               |Bit3     |Bit5
+	.hword (0x2d<<8)          |VBit|Bit3     |Bit5
+	.hword (0x2e<<8)          |VBit|Bit3     |Bit5
+	.hword (0x2f<<8)               |Bit3     |Bit5
+	.hword (0x30<<8)          |VBit     |HBit|Bit5
+	.hword (0x31<<8)                    |HBit|Bit5
+	.hword (0x32<<8)                    |HBit|Bit5
+	.hword (0x33<<8)          |VBit     |HBit|Bit5
+	.hword (0x34<<8)                    |HBit|Bit5
+	.hword (0x35<<8)          |VBit     |HBit|Bit5
+	.hword (0x36<<8)          |VBit          |Bit5
+	.hword (0x37<<8)                         |Bit5
+	.hword (0x38<<8)               |Bit3     |Bit5
+	.hword (0x39<<8)          |VBit|Bit3     |Bit5
+	.hword (0x3a<<8)          |VBit|Bit3     |Bit5
+	.hword (0x3b<<8)               |Bit3     |Bit5
+	.hword (0x3c<<8)          |VBit|Bit3     |Bit5
+	.hword (0x3d<<8)               |Bit3     |Bit5
+	.hword (0x3e<<8)               |Bit3     |Bit5
+	.hword (0x3f<<8)          |VBit|Bit3     |Bit5
+	.hword (0x40<<8)                    |HBit
+	.hword (0x41<<8)          |VBit     |HBit
+	.hword (0x42<<8)          |VBit     |HBit
+	.hword (0x43<<8)                    |HBit
+	.hword (0x44<<8)          |VBit     |HBit
+	.hword (0x45<<8)                    |HBit
+	.hword (0x46<<8)
+	.hword (0x47<<8)          |VBit
+	.hword (0x48<<8)          |VBit|Bit3
+	.hword (0x49<<8)               |Bit3
+	.hword (0x4a<<8)               |Bit3
+	.hword (0x4b<<8)          |VBit|Bit3
+	.hword (0x4c<<8)               |Bit3
+	.hword (0x4d<<8)          |VBit|Bit3
+	.hword (0x4e<<8)          |VBit|Bit3
+	.hword (0x4f<<8)               |Bit3
+	.hword (0x50<<8)          |VBit     |HBit
+	.hword (0x51<<8)                    |HBit
+	.hword (0x52<<8)                    |HBit
+	.hword (0x53<<8)          |VBit     |HBit
+	.hword (0x54<<8)                    |HBit
+	.hword (0x55<<8)          |VBit     |HBit
+	.hword (0x56<<8)          |VBit
+	.hword (0x57<<8)
+	.hword (0x58<<8)               |Bit3
+	.hword (0x59<<8)          |VBit|Bit3
+	.hword (0x5a<<8)          |VBit|Bit3
+	.hword (0x5b<<8)               |Bit3
+	.hword (0x5c<<8)          |VBit|Bit3
+	.hword (0x5d<<8)               |Bit3
+	.hword (0x5e<<8)               |Bit3
+	.hword (0x5f<<8)          |VBit|Bit3
+	.hword (0x60<<8)          |VBit     |HBit|Bit5
+	.hword (0x61<<8)                    |HBit|Bit5
+	.hword (0x62<<8)                    |HBit|Bit5
+	.hword (0x63<<8)          |VBit     |HBit|Bit5
+	.hword (0x64<<8)                    |HBit|Bit5
+	.hword (0x65<<8)          |VBit     |HBit|Bit5
+	.hword (0x66<<8)          |VBit          |Bit5
+	.hword (0x67<<8)                         |Bit5
+	.hword (0x68<<8)               |Bit3     |Bit5
+	.hword (0x69<<8)          |VBit|Bit3     |Bit5
+	.hword (0x6a<<8)          |VBit|Bit3     |Bit5
+	.hword (0x6b<<8)               |Bit3     |Bit5
+	.hword (0x6c<<8)          |VBit|Bit3     |Bit5
+	.hword (0x6d<<8)               |Bit3     |Bit5
+	.hword (0x6e<<8)               |Bit3     |Bit5
+	.hword (0x6f<<8)          |VBit|Bit3     |Bit5
+	.hword (0x70<<8)                    |HBit|Bit5
+	.hword (0x71<<8)          |VBit     |HBit|Bit5
+	.hword (0x72<<8)          |VBit     |HBit|Bit5
+	.hword (0x73<<8)                    |HBit|Bit5
+	.hword (0x74<<8)          |VBit     |HBit|Bit5
+	.hword (0x75<<8)                    |HBit|Bit5
+	.hword (0x76<<8)                         |Bit5
+	.hword (0x77<<8)          |VBit          |Bit5
+	.hword (0x78<<8)          |VBit|Bit3     |Bit5
+	.hword (0x79<<8)               |Bit3     |Bit5
+	.hword (0x7a<<8)               |Bit3     |Bit5
+	.hword (0x7b<<8)          |VBit|Bit3     |Bit5
+	.hword (0x7c<<8)               |Bit3     |Bit5
+	.hword (0x7d<<8)          |VBit|Bit3     |Bit5
+	.hword (0x7e<<8)          |VBit|Bit3     |Bit5
+	.hword (0x7f<<8)               |Bit3     |Bit5
+	.hword (0x80<<8)                    |HBit          |SBit
+	.hword (0x81<<8)          |VBit     |HBit          |SBit
+	.hword (0x82<<8)          |VBit     |HBit          |SBit
+	.hword (0x83<<8)                    |HBit          |SBit
+	.hword (0x84<<8)          |VBit     |HBit          |SBit
+	.hword (0x85<<8)                    |HBit          |SBit
+	.hword (0x86<<8)                                   |SBit
+	.hword (0x87<<8)          |VBit                    |SBit
+	.hword (0x88<<8)          |VBit|Bit3               |SBit
+	.hword (0x89<<8)               |Bit3               |SBit
+	.hword (0x8a<<8)               |Bit3               |SBit
+	.hword (0x8b<<8)          |VBit|Bit3               |SBit
+	.hword (0x8c<<8)               |Bit3               |SBit
+	.hword (0x8d<<8)          |VBit|Bit3               |SBit
+	.hword (0x8e<<8)          |VBit|Bit3               |SBit
+	.hword (0x8f<<8)               |Bit3               |SBit
+	.hword (0x90<<8)          |VBit     |HBit          |SBit
+	.hword (0x91<<8)                    |HBit          |SBit
+	.hword (0x92<<8)                    |HBit          |SBit
+	.hword (0x93<<8)          |VBit     |HBit          |SBit
+	.hword (0x94<<8)                    |HBit          |SBit
+	.hword (0x95<<8)          |VBit     |HBit          |SBit
+	.hword (0x96<<8)          |VBit                    |SBit
+	.hword (0x97<<8)                                   |SBit
+	.hword (0x98<<8)               |Bit3               |SBit
+	.hword (0x99<<8)          |VBit|Bit3               |SBit
+	.hword (0x9a<<8)          |VBit|Bit3               |SBit
+	.hword (0x9b<<8)               |Bit3               |SBit
+	.hword (0x9c<<8)          |VBit|Bit3               |SBit
+	.hword (0x9d<<8)               |Bit3               |SBit
+	.hword (0x9e<<8)               |Bit3               |SBit
+	.hword (0x9f<<8)          |VBit|Bit3               |SBit
+	.hword (0x00<<8)|CBit     |VBit     |HBit     |ZBit
+	.hword (0x01<<8)|CBit               |HBit
+	.hword (0x02<<8)|CBit               |HBit
+	.hword (0x03<<8)|CBit     |VBit     |HBit
+	.hword (0x04<<8)|CBit               |HBit
+	.hword (0x05<<8)|CBit     |VBit     |HBit
+	.hword (0x06<<8)|CBit     |VBit
+	.hword (0x07<<8)|CBit
+	.hword (0x08<<8)|CBit          |Bit3
+	.hword (0x09<<8)|CBit     |VBit|Bit3
+	.hword (0x0a<<8)|CBit     |VBit|Bit3
+	.hword (0x0b<<8)|CBit          |Bit3
+	.hword (0x0c<<8)|CBit     |VBit|Bit3
+	.hword (0x0d<<8)|CBit          |Bit3
+	.hword (0x0e<<8)|CBit          |Bit3
+	.hword (0x0f<<8)|CBit     |VBit|Bit3
+	.hword (0x10<<8)|CBit               |HBit
+	.hword (0x11<<8)|CBit     |VBit     |HBit
+	.hword (0x12<<8)|CBit     |VBit     |HBit
+	.hword (0x13<<8)|CBit               |HBit
+	.hword (0x14<<8)|CBit     |VBit     |HBit
+	.hword (0x15<<8)|CBit               |HBit
+	.hword (0x16<<8)|CBit
+	.hword (0x17<<8)|CBit     |VBit
+	.hword (0x18<<8)|CBit     |VBit|Bit3
+	.hword (0x19<<8)|CBit          |Bit3
+	.hword (0x1a<<8)|CBit          |Bit3
+	.hword (0x1b<<8)|CBit     |VBit|Bit3
+	.hword (0x1c<<8)|CBit          |Bit3
+	.hword (0x1d<<8)|CBit     |VBit|Bit3
+	.hword (0x1e<<8)|CBit     |VBit|Bit3
+	.hword (0x1f<<8)|CBit          |Bit3
+	.hword (0x20<<8)|CBit               |HBit|Bit5
+	.hword (0x21<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x22<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x23<<8)|CBit               |HBit|Bit5
+	.hword (0x24<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x25<<8)|CBit               |HBit|Bit5
+	.hword (0x26<<8)|CBit                    |Bit5
+	.hword (0x27<<8)|CBit     |VBit          |Bit5
+	.hword (0x28<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x29<<8)|CBit          |Bit3     |Bit5
+	.hword (0x2a<<8)|CBit          |Bit3     |Bit5
+	.hword (0x2b<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x2c<<8)|CBit          |Bit3     |Bit5
+	.hword (0x2d<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x2e<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x2f<<8)|CBit          |Bit3     |Bit5
+	.hword (0x30<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x31<<8)|CBit               |HBit|Bit5
+	.hword (0x32<<8)|CBit               |HBit|Bit5
+	.hword (0x33<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x34<<8)|CBit               |HBit|Bit5
+	.hword (0x35<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x36<<8)|CBit     |VBit          |Bit5
+	.hword (0x37<<8)|CBit                    |Bit5
+	.hword (0x38<<8)|CBit          |Bit3     |Bit5
+	.hword (0x39<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x3a<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x3b<<8)|CBit          |Bit3     |Bit5
+	.hword (0x3c<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x3d<<8)|CBit          |Bit3     |Bit5
+	.hword (0x3e<<8)|CBit          |Bit3     |Bit5
+	.hword (0x3f<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x40<<8)|CBit               |HBit
+	.hword (0x41<<8)|CBit     |VBit     |HBit
+	.hword (0x42<<8)|CBit     |VBit     |HBit
+	.hword (0x43<<8)|CBit               |HBit
+	.hword (0x44<<8)|CBit     |VBit     |HBit
+	.hword (0x45<<8)|CBit               |HBit
+	.hword (0x46<<8)|CBit
+	.hword (0x47<<8)|CBit     |VBit
+	.hword (0x48<<8)|CBit     |VBit|Bit3
+	.hword (0x49<<8)|CBit          |Bit3
+	.hword (0x4a<<8)|CBit          |Bit3
+	.hword (0x4b<<8)|CBit     |VBit|Bit3
+	.hword (0x4c<<8)|CBit          |Bit3
+	.hword (0x4d<<8)|CBit     |VBit|Bit3
+	.hword (0x4e<<8)|CBit     |VBit|Bit3
+	.hword (0x4f<<8)|CBit          |Bit3
+	.hword (0x50<<8)|CBit     |VBit     |HBit
+	.hword (0x51<<8)|CBit               |HBit
+	.hword (0x52<<8)|CBit               |HBit
+	.hword (0x53<<8)|CBit     |VBit     |HBit
+	.hword (0x54<<8)|CBit               |HBit
+	.hword (0x55<<8)|CBit     |VBit     |HBit
+	.hword (0x56<<8)|CBit     |VBit
+	.hword (0x57<<8)|CBit
+	.hword (0x58<<8)|CBit          |Bit3
+	.hword (0x59<<8)|CBit     |VBit|Bit3
+	.hword (0x5a<<8)|CBit     |VBit|Bit3
+	.hword (0x5b<<8)|CBit          |Bit3
+	.hword (0x5c<<8)|CBit     |VBit|Bit3
+	.hword (0x5d<<8)|CBit          |Bit3
+	.hword (0x5e<<8)|CBit          |Bit3
+	.hword (0x5f<<8)|CBit     |VBit|Bit3
+	.hword (0x60<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x61<<8)|CBit               |HBit|Bit5
+	.hword (0x62<<8)|CBit               |HBit|Bit5
+	.hword (0x63<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x64<<8)|CBit               |HBit|Bit5
+	.hword (0x65<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x66<<8)|CBit     |VBit          |Bit5
+	.hword (0x67<<8)|CBit                    |Bit5
+	.hword (0x68<<8)|CBit          |Bit3     |Bit5
+	.hword (0x69<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x6a<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x6b<<8)|CBit          |Bit3     |Bit5
+	.hword (0x6c<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x6d<<8)|CBit          |Bit3     |Bit5
+	.hword (0x6e<<8)|CBit          |Bit3     |Bit5
+	.hword (0x6f<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x70<<8)|CBit               |HBit|Bit5
+	.hword (0x71<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x72<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x73<<8)|CBit               |HBit|Bit5
+	.hword (0x74<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x75<<8)|CBit               |HBit|Bit5
+	.hword (0x76<<8)|CBit                    |Bit5
+	.hword (0x77<<8)|CBit     |VBit          |Bit5
+	.hword (0x78<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x79<<8)|CBit          |Bit3     |Bit5
+	.hword (0x7a<<8)|CBit          |Bit3     |Bit5
+	.hword (0x7b<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x7c<<8)|CBit          |Bit3     |Bit5
+	.hword (0x7d<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x7e<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x7f<<8)|CBit          |Bit3     |Bit5
+	.hword (0x80<<8)|CBit               |HBit          |SBit
+	.hword (0x81<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x82<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x83<<8)|CBit               |HBit          |SBit
+	.hword (0x84<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x85<<8)|CBit               |HBit          |SBit
+	.hword (0x86<<8)|CBit                              |SBit
+	.hword (0x87<<8)|CBit     |VBit                    |SBit
+	.hword (0x88<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0x89<<8)|CBit          |Bit3               |SBit
+	.hword (0x8a<<8)|CBit          |Bit3               |SBit
+	.hword (0x8b<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0x8c<<8)|CBit          |Bit3               |SBit
+	.hword (0x8d<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0x8e<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0x8f<<8)|CBit          |Bit3               |SBit
+	.hword (0x90<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x91<<8)|CBit               |HBit          |SBit
+	.hword (0x92<<8)|CBit               |HBit          |SBit
+	.hword (0x93<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x94<<8)|CBit               |HBit          |SBit
+	.hword (0x95<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0x96<<8)|CBit     |VBit                    |SBit
+	.hword (0x97<<8)|CBit                              |SBit
+	.hword (0x98<<8)|CBit          |Bit3               |SBit
+	.hword (0x99<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0x9a<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0x9b<<8)|CBit          |Bit3               |SBit
+	.hword (0x9c<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0x9d<<8)|CBit          |Bit3               |SBit
+	.hword (0x9e<<8)|CBit          |Bit3               |SBit
+	.hword (0x9f<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xa0<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xa1<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xa2<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xa3<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xa4<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xa5<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xa6<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xa7<<8)|CBit                    |Bit5     |SBit
+	.hword (0xa8<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xa9<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xaa<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xab<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xac<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xad<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xae<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xaf<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xb0<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xb1<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xb2<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xb3<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xb4<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xb5<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xb6<<8)|CBit                    |Bit5     |SBit
+	.hword (0xb7<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xb8<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xb9<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xba<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xbb<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xbc<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xbd<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xbe<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xbf<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xc0<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xc1<<8)|CBit               |HBit          |SBit
+	.hword (0xc2<<8)|CBit               |HBit          |SBit
+	.hword (0xc3<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xc4<<8)|CBit               |HBit          |SBit
+	.hword (0xc5<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xc6<<8)|CBit     |VBit                    |SBit
+	.hword (0xc7<<8)|CBit                              |SBit
+	.hword (0xc8<<8)|CBit          |Bit3               |SBit
+	.hword (0xc9<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xca<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xcb<<8)|CBit          |Bit3               |SBit
+	.hword (0xcc<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xcd<<8)|CBit          |Bit3               |SBit
+	.hword (0xce<<8)|CBit          |Bit3               |SBit
+	.hword (0xcf<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xd0<<8)|CBit               |HBit          |SBit
+	.hword (0xd1<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xd2<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xd3<<8)|CBit               |HBit          |SBit
+	.hword (0xd4<<8)|CBit     |VBit     |HBit          |SBit
+	.hword (0xd5<<8)|CBit               |HBit          |SBit
+	.hword (0xd6<<8)|CBit                              |SBit
+	.hword (0xd7<<8)|CBit     |VBit                    |SBit
+	.hword (0xd8<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xd9<<8)|CBit          |Bit3               |SBit
+	.hword (0xda<<8)|CBit          |Bit3               |SBit
+	.hword (0xdb<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xdc<<8)|CBit          |Bit3               |SBit
+	.hword (0xdd<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xde<<8)|CBit     |VBit|Bit3               |SBit
+	.hword (0xdf<<8)|CBit          |Bit3               |SBit
+	.hword (0xe0<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xe1<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xe2<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xe3<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xe4<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xe5<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xe6<<8)|CBit                    |Bit5     |SBit
+	.hword (0xe7<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xe8<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xe9<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xea<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xeb<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xec<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xed<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xee<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xef<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xf0<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xf1<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xf2<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xf3<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xf4<<8)|CBit               |HBit|Bit5     |SBit
+	.hword (0xf5<<8)|CBit     |VBit     |HBit|Bit5     |SBit
+	.hword (0xf6<<8)|CBit     |VBit          |Bit5     |SBit
+	.hword (0xf7<<8)|CBit                    |Bit5     |SBit
+	.hword (0xf8<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xf9<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xfa<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xfb<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xfc<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0xfd<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xfe<<8)|CBit          |Bit3     |Bit5     |SBit
+	.hword (0xff<<8)|CBit     |VBit|Bit3     |Bit5     |SBit
+	.hword (0x00<<8)|CBit     |VBit     |HBit     |ZBit
+	.hword (0x01<<8)|CBit               |HBit
+	.hword (0x02<<8)|CBit               |HBit
+	.hword (0x03<<8)|CBit     |VBit     |HBit
+	.hword (0x04<<8)|CBit               |HBit
+	.hword (0x05<<8)|CBit     |VBit     |HBit
+	.hword (0x06<<8)|CBit     |VBit
+	.hword (0x07<<8)|CBit
+	.hword (0x08<<8)|CBit          |Bit3
+	.hword (0x09<<8)|CBit     |VBit|Bit3
+	.hword (0x0a<<8)|CBit     |VBit|Bit3
+	.hword (0x0b<<8)|CBit          |Bit3
+	.hword (0x0c<<8)|CBit     |VBit|Bit3
+	.hword (0x0d<<8)|CBit          |Bit3
+	.hword (0x0e<<8)|CBit          |Bit3
+	.hword (0x0f<<8)|CBit     |VBit|Bit3
+	.hword (0x10<<8)|CBit               |HBit
+	.hword (0x11<<8)|CBit     |VBit     |HBit
+	.hword (0x12<<8)|CBit     |VBit     |HBit
+	.hword (0x13<<8)|CBit               |HBit
+	.hword (0x14<<8)|CBit     |VBit     |HBit
+	.hword (0x15<<8)|CBit               |HBit
+	.hword (0x16<<8)|CBit
+	.hword (0x17<<8)|CBit     |VBit
+	.hword (0x18<<8)|CBit     |VBit|Bit3
+	.hword (0x19<<8)|CBit          |Bit3
+	.hword (0x1a<<8)|CBit          |Bit3
+	.hword (0x1b<<8)|CBit     |VBit|Bit3
+	.hword (0x1c<<8)|CBit          |Bit3
+	.hword (0x1d<<8)|CBit     |VBit|Bit3
+	.hword (0x1e<<8)|CBit     |VBit|Bit3
+	.hword (0x1f<<8)|CBit          |Bit3
+	.hword (0x20<<8)|CBit               |HBit|Bit5
+	.hword (0x21<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x22<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x23<<8)|CBit               |HBit|Bit5
+	.hword (0x24<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x25<<8)|CBit               |HBit|Bit5
+	.hword (0x26<<8)|CBit                    |Bit5
+	.hword (0x27<<8)|CBit     |VBit          |Bit5
+	.hword (0x28<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x29<<8)|CBit          |Bit3     |Bit5
+	.hword (0x2a<<8)|CBit          |Bit3     |Bit5
+	.hword (0x2b<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x2c<<8)|CBit          |Bit3     |Bit5
+	.hword (0x2d<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x2e<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x2f<<8)|CBit          |Bit3     |Bit5
+	.hword (0x30<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x31<<8)|CBit               |HBit|Bit5
+	.hword (0x32<<8)|CBit               |HBit|Bit5
+	.hword (0x33<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x34<<8)|CBit               |HBit|Bit5
+	.hword (0x35<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x36<<8)|CBit     |VBit          |Bit5
+	.hword (0x37<<8)|CBit                    |Bit5
+	.hword (0x38<<8)|CBit          |Bit3     |Bit5
+	.hword (0x39<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x3a<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x3b<<8)|CBit          |Bit3     |Bit5
+	.hword (0x3c<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x3d<<8)|CBit          |Bit3     |Bit5
+	.hword (0x3e<<8)|CBit          |Bit3     |Bit5
+	.hword (0x3f<<8)|CBit     |VBit|Bit3     |Bit5
+	.hword (0x40<<8)|CBit               |HBit
+	.hword (0x41<<8)|CBit     |VBit     |HBit
+	.hword (0x42<<8)|CBit     |VBit     |HBit
+	.hword (0x43<<8)|CBit               |HBit
+	.hword (0x44<<8)|CBit     |VBit     |HBit
+	.hword (0x45<<8)|CBit               |HBit
+	.hword (0x46<<8)|CBit
+	.hword (0x47<<8)|CBit     |VBit
+	.hword (0x48<<8)|CBit     |VBit|Bit3
+	.hword (0x49<<8)|CBit          |Bit3
+	.hword (0x4a<<8)|CBit          |Bit3
+	.hword (0x4b<<8)|CBit     |VBit|Bit3
+	.hword (0x4c<<8)|CBit          |Bit3
+	.hword (0x4d<<8)|CBit     |VBit|Bit3
+	.hword (0x4e<<8)|CBit     |VBit|Bit3
+	.hword (0x4f<<8)|CBit          |Bit3
+	.hword (0x50<<8)|CBit     |VBit     |HBit
+	.hword (0x51<<8)|CBit               |HBit
+	.hword (0x52<<8)|CBit               |HBit
+	.hword (0x53<<8)|CBit     |VBit     |HBit
+	.hword (0x54<<8)|CBit               |HBit
+	.hword (0x55<<8)|CBit     |VBit     |HBit
+	.hword (0x56<<8)|CBit     |VBit
+	.hword (0x57<<8)|CBit
+	.hword (0x58<<8)|CBit          |Bit3
+	.hword (0x59<<8)|CBit     |VBit|Bit3
+	.hword (0x5a<<8)|CBit     |VBit|Bit3
+	.hword (0x5b<<8)|CBit          |Bit3
+	.hword (0x5c<<8)|CBit     |VBit|Bit3
+	.hword (0x5d<<8)|CBit          |Bit3
+	.hword (0x5e<<8)|CBit          |Bit3
+	.hword (0x5f<<8)|CBit     |VBit|Bit3
+	.hword (0x60<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x61<<8)|CBit               |HBit|Bit5
+	.hword (0x62<<8)|CBit               |HBit|Bit5
+	.hword (0x63<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x64<<8)|CBit               |HBit|Bit5
+	.hword (0x65<<8)|CBit     |VBit     |HBit|Bit5
+	.hword (0x00<<8)     |NBit|VBit               |ZBit
+	.hword (0x01<<8)     |NBit
+	.hword (0x02<<8)     |NBit
+	.hword (0x03<<8)     |NBit|VBit
+	.hword (0x04<<8)     |NBit
+	.hword (0x05<<8)     |NBit|VBit
+	.hword (0x06<<8)     |NBit|VBit
+	.hword (0x07<<8)     |NBit
+	.hword (0x08<<8)     |NBit     |Bit3
+	.hword (0x09<<8)     |NBit|VBit|Bit3
+	.hword (0x04<<8)     |NBit
+	.hword (0x05<<8)     |NBit|VBit
+	.hword (0x06<<8)     |NBit|VBit
+	.hword (0x07<<8)     |NBit
+	.hword (0x08<<8)     |NBit     |Bit3
+	.hword (0x09<<8)     |NBit|VBit|Bit3
+	.hword (0x10<<8)     |NBit
+	.hword (0x11<<8)     |NBit|VBit
+	.hword (0x12<<8)     |NBit|VBit
+	.hword (0x13<<8)     |NBit
+	.hword (0x14<<8)     |NBit|VBit
+	.hword (0x15<<8)     |NBit
+	.hword (0x16<<8)     |NBit
+	.hword (0x17<<8)     |NBit|VBit
+	.hword (0x18<<8)     |NBit|VBit|Bit3
+	.hword (0x19<<8)     |NBit     |Bit3
+	.hword (0x14<<8)     |NBit|VBit
+	.hword (0x15<<8)     |NBit
+	.hword (0x16<<8)     |NBit
+	.hword (0x17<<8)     |NBit|VBit
+	.hword (0x18<<8)     |NBit|VBit|Bit3
+	.hword (0x19<<8)     |NBit     |Bit3
+	.hword (0x20<<8)     |NBit               |Bit5
+	.hword (0x21<<8)     |NBit|VBit          |Bit5
+	.hword (0x22<<8)     |NBit|VBit          |Bit5
+	.hword (0x23<<8)     |NBit               |Bit5
+	.hword (0x24<<8)     |NBit|VBit          |Bit5
+	.hword (0x25<<8)     |NBit               |Bit5
+	.hword (0x26<<8)     |NBit               |Bit5
+	.hword (0x27<<8)     |NBit|VBit          |Bit5
+	.hword (0x28<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x29<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x24<<8)     |NBit|VBit          |Bit5
+	.hword (0x25<<8)     |NBit               |Bit5
+	.hword (0x26<<8)     |NBit               |Bit5
+	.hword (0x27<<8)     |NBit|VBit          |Bit5
+	.hword (0x28<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x29<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x30<<8)     |NBit|VBit          |Bit5
+	.hword (0x31<<8)     |NBit               |Bit5
+	.hword (0x32<<8)     |NBit               |Bit5
+	.hword (0x33<<8)     |NBit|VBit          |Bit5
+	.hword (0x34<<8)     |NBit               |Bit5
+	.hword (0x35<<8)     |NBit|VBit          |Bit5
+	.hword (0x36<<8)     |NBit|VBit          |Bit5
+	.hword (0x37<<8)     |NBit               |Bit5
+	.hword (0x38<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x39<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x34<<8)     |NBit               |Bit5
+	.hword (0x35<<8)     |NBit|VBit          |Bit5
+	.hword (0x36<<8)     |NBit|VBit          |Bit5
+	.hword (0x37<<8)     |NBit               |Bit5
+	.hword (0x38<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x39<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x40<<8)     |NBit
+	.hword (0x41<<8)     |NBit|VBit
+	.hword (0x42<<8)     |NBit|VBit
+	.hword (0x43<<8)     |NBit
+	.hword (0x44<<8)     |NBit|VBit
+	.hword (0x45<<8)     |NBit
+	.hword (0x46<<8)     |NBit
+	.hword (0x47<<8)     |NBit|VBit
+	.hword (0x48<<8)     |NBit|VBit|Bit3
+	.hword (0x49<<8)     |NBit     |Bit3
+	.hword (0x44<<8)     |NBit|VBit
+	.hword (0x45<<8)     |NBit
+	.hword (0x46<<8)     |NBit
+	.hword (0x47<<8)     |NBit|VBit
+	.hword (0x48<<8)     |NBit|VBit|Bit3
+	.hword (0x49<<8)     |NBit     |Bit3
+	.hword (0x50<<8)     |NBit|VBit
+	.hword (0x51<<8)     |NBit
+	.hword (0x52<<8)     |NBit
+	.hword (0x53<<8)     |NBit|VBit
+	.hword (0x54<<8)     |NBit
+	.hword (0x55<<8)     |NBit|VBit
+	.hword (0x56<<8)     |NBit|VBit
+	.hword (0x57<<8)     |NBit
+	.hword (0x58<<8)     |NBit     |Bit3
+	.hword (0x59<<8)     |NBit|VBit|Bit3
+	.hword (0x54<<8)     |NBit
+	.hword (0x55<<8)     |NBit|VBit
+	.hword (0x56<<8)     |NBit|VBit
+	.hword (0x57<<8)     |NBit
+	.hword (0x58<<8)     |NBit     |Bit3
+	.hword (0x59<<8)     |NBit|VBit|Bit3
+	.hword (0x60<<8)     |NBit|VBit          |Bit5
+	.hword (0x61<<8)     |NBit               |Bit5
+	.hword (0x62<<8)     |NBit               |Bit5
+	.hword (0x63<<8)     |NBit|VBit          |Bit5
+	.hword (0x64<<8)     |NBit               |Bit5
+	.hword (0x65<<8)     |NBit|VBit          |Bit5
+	.hword (0x66<<8)     |NBit|VBit          |Bit5
+	.hword (0x67<<8)     |NBit               |Bit5
+	.hword (0x68<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x69<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x64<<8)     |NBit               |Bit5
+	.hword (0x65<<8)     |NBit|VBit          |Bit5
+	.hword (0x66<<8)     |NBit|VBit          |Bit5
+	.hword (0x67<<8)     |NBit               |Bit5
+	.hword (0x68<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x69<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x70<<8)     |NBit               |Bit5
+	.hword (0x71<<8)     |NBit|VBit          |Bit5
+	.hword (0x72<<8)     |NBit|VBit          |Bit5
+	.hword (0x73<<8)     |NBit               |Bit5
+	.hword (0x74<<8)     |NBit|VBit          |Bit5
+	.hword (0x75<<8)     |NBit               |Bit5
+	.hword (0x76<<8)     |NBit               |Bit5
+	.hword (0x77<<8)     |NBit|VBit          |Bit5
+	.hword (0x78<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x79<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x74<<8)     |NBit|VBit          |Bit5
+	.hword (0x75<<8)     |NBit               |Bit5
+	.hword (0x76<<8)     |NBit               |Bit5
+	.hword (0x77<<8)     |NBit|VBit          |Bit5
+	.hword (0x78<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x79<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x80<<8)     |NBit                         |SBit
+	.hword (0x81<<8)     |NBit|VBit                    |SBit
+	.hword (0x82<<8)     |NBit|VBit                    |SBit
+	.hword (0x83<<8)     |NBit                         |SBit
+	.hword (0x84<<8)     |NBit|VBit                    |SBit
+	.hword (0x85<<8)     |NBit                         |SBit
+	.hword (0x86<<8)     |NBit                         |SBit
+	.hword (0x87<<8)     |NBit|VBit                    |SBit
+	.hword (0x88<<8)     |NBit|VBit|Bit3               |SBit
+	.hword (0x89<<8)     |NBit     |Bit3               |SBit
+	.hword (0x84<<8)     |NBit|VBit                    |SBit
+	.hword (0x85<<8)     |NBit                         |SBit
+	.hword (0x86<<8)     |NBit                         |SBit
+	.hword (0x87<<8)     |NBit|VBit                    |SBit
+	.hword (0x88<<8)     |NBit|VBit|Bit3               |SBit
+	.hword (0x89<<8)     |NBit     |Bit3               |SBit
+	.hword (0x90<<8)     |NBit|VBit                    |SBit
+	.hword (0x91<<8)     |NBit                         |SBit
+	.hword (0x92<<8)     |NBit                         |SBit
+	.hword (0x93<<8)     |NBit|VBit                    |SBit
+	.hword (0x94<<8)     |NBit                         |SBit
+	.hword (0x95<<8)     |NBit|VBit                    |SBit
+	.hword (0x96<<8)     |NBit|VBit                    |SBit
+	.hword (0x97<<8)     |NBit                         |SBit
+	.hword (0x98<<8)     |NBit     |Bit3               |SBit
+	.hword (0x99<<8)     |NBit|VBit|Bit3               |SBit
+	.hword (0x34<<8)|CBit|NBit               |Bit5
+	.hword (0x35<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x36<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x37<<8)|CBit|NBit               |Bit5
+	.hword (0x38<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x39<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x40<<8)|CBit|NBit
+	.hword (0x41<<8)|CBit|NBit|VBit
+	.hword (0x42<<8)|CBit|NBit|VBit
+	.hword (0x43<<8)|CBit|NBit
+	.hword (0x44<<8)|CBit|NBit|VBit
+	.hword (0x45<<8)|CBit|NBit
+	.hword (0x46<<8)|CBit|NBit
+	.hword (0x47<<8)|CBit|NBit|VBit
+	.hword (0x48<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x49<<8)|CBit|NBit     |Bit3
+	.hword (0x44<<8)|CBit|NBit|VBit
+	.hword (0x45<<8)|CBit|NBit
+	.hword (0x46<<8)|CBit|NBit
+	.hword (0x47<<8)|CBit|NBit|VBit
+	.hword (0x48<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x49<<8)|CBit|NBit     |Bit3
+	.hword (0x50<<8)|CBit|NBit|VBit
+	.hword (0x51<<8)|CBit|NBit
+	.hword (0x52<<8)|CBit|NBit
+	.hword (0x53<<8)|CBit|NBit|VBit
+	.hword (0x54<<8)|CBit|NBit
+	.hword (0x55<<8)|CBit|NBit|VBit
+	.hword (0x56<<8)|CBit|NBit|VBit
+	.hword (0x57<<8)|CBit|NBit
+	.hword (0x58<<8)|CBit|NBit     |Bit3
+	.hword (0x59<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x54<<8)|CBit|NBit
+	.hword (0x55<<8)|CBit|NBit|VBit
+	.hword (0x56<<8)|CBit|NBit|VBit
+	.hword (0x57<<8)|CBit|NBit
+	.hword (0x58<<8)|CBit|NBit     |Bit3
+	.hword (0x59<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x60<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x61<<8)|CBit|NBit               |Bit5
+	.hword (0x62<<8)|CBit|NBit               |Bit5
+	.hword (0x63<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x64<<8)|CBit|NBit               |Bit5
+	.hword (0x65<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x66<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x67<<8)|CBit|NBit               |Bit5
+	.hword (0x68<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x69<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x64<<8)|CBit|NBit               |Bit5
+	.hword (0x65<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x66<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x67<<8)|CBit|NBit               |Bit5
+	.hword (0x68<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x69<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x70<<8)|CBit|NBit               |Bit5
+	.hword (0x71<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x72<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x73<<8)|CBit|NBit               |Bit5
+	.hword (0x74<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x75<<8)|CBit|NBit               |Bit5
+	.hword (0x76<<8)|CBit|NBit               |Bit5
+	.hword (0x77<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x78<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x79<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x74<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x75<<8)|CBit|NBit               |Bit5
+	.hword (0x76<<8)|CBit|NBit               |Bit5
+	.hword (0x77<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x78<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x79<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x80<<8)|CBit|NBit                         |SBit
+	.hword (0x81<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x82<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x83<<8)|CBit|NBit                         |SBit
+	.hword (0x84<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x85<<8)|CBit|NBit                         |SBit
+	.hword (0x86<<8)|CBit|NBit                         |SBit
+	.hword (0x87<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x88<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0x89<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x84<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x85<<8)|CBit|NBit                         |SBit
+	.hword (0x86<<8)|CBit|NBit                         |SBit
+	.hword (0x87<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x88<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0x89<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x90<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x91<<8)|CBit|NBit                         |SBit
+	.hword (0x92<<8)|CBit|NBit                         |SBit
+	.hword (0x93<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x94<<8)|CBit|NBit                         |SBit
+	.hword (0x95<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x96<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x97<<8)|CBit|NBit                         |SBit
+	.hword (0x98<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x99<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0x94<<8)|CBit|NBit                         |SBit
+	.hword (0x95<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x96<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x97<<8)|CBit|NBit                         |SBit
+	.hword (0x98<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x99<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0xa0<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xa1<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xa2<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xa3<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xa4<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xa5<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xa6<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xa7<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xa8<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xa9<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xa4<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xa5<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xa6<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xa7<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xa8<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xa9<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xb0<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xb1<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xb2<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xb3<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xb4<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xb5<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xb6<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xb7<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xb8<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xb9<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xb4<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xb5<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xb6<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xb7<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xb8<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xb9<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xc0<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xc1<<8)|CBit|NBit                         |SBit
+	.hword (0xc2<<8)|CBit|NBit                         |SBit
+	.hword (0xc3<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xc4<<8)|CBit|NBit                         |SBit
+	.hword (0xc5<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xc6<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xc7<<8)|CBit|NBit                         |SBit
+	.hword (0xc8<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0xc9<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0xc4<<8)|CBit|NBit                         |SBit
+	.hword (0xc5<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xc6<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xc7<<8)|CBit|NBit                         |SBit
+	.hword (0xc8<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0xc9<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0xd0<<8)|CBit|NBit                         |SBit
+	.hword (0xd1<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xd2<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xd3<<8)|CBit|NBit                         |SBit
+	.hword (0xd4<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xd5<<8)|CBit|NBit                         |SBit
+	.hword (0xd6<<8)|CBit|NBit                         |SBit
+	.hword (0xd7<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xd8<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0xd9<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0xd4<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xd5<<8)|CBit|NBit                         |SBit
+	.hword (0xd6<<8)|CBit|NBit                         |SBit
+	.hword (0xd7<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xd8<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0xd9<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0xe0<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xe1<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xe2<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xe3<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xe4<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xe5<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xe6<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xe7<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xe8<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xe9<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xe4<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xe5<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xe6<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xe7<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xe8<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xe9<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xf0<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xf1<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xf2<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xf3<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xf4<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xf5<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xf6<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xf7<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xf8<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xf9<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xf4<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xf5<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xf6<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xf7<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xf8<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xf9<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0x00<<8)|CBit|NBit|VBit               |ZBit
+	.hword (0x01<<8)|CBit|NBit
+	.hword (0x02<<8)|CBit|NBit
+	.hword (0x03<<8)|CBit|NBit|VBit
+	.hword (0x04<<8)|CBit|NBit
+	.hword (0x05<<8)|CBit|NBit|VBit
+	.hword (0x06<<8)|CBit|NBit|VBit
+	.hword (0x07<<8)|CBit|NBit
+	.hword (0x08<<8)|CBit|NBit     |Bit3
+	.hword (0x09<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x04<<8)|CBit|NBit
+	.hword (0x05<<8)|CBit|NBit|VBit
+	.hword (0x06<<8)|CBit|NBit|VBit
+	.hword (0x07<<8)|CBit|NBit
+	.hword (0x08<<8)|CBit|NBit     |Bit3
+	.hword (0x09<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x10<<8)|CBit|NBit
+	.hword (0x11<<8)|CBit|NBit|VBit
+	.hword (0x12<<8)|CBit|NBit|VBit
+	.hword (0x13<<8)|CBit|NBit
+	.hword (0x14<<8)|CBit|NBit|VBit
+	.hword (0x15<<8)|CBit|NBit
+	.hword (0x16<<8)|CBit|NBit
+	.hword (0x17<<8)|CBit|NBit|VBit
+	.hword (0x18<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x19<<8)|CBit|NBit     |Bit3
+	.hword (0x14<<8)|CBit|NBit|VBit
+	.hword (0x15<<8)|CBit|NBit
+	.hword (0x16<<8)|CBit|NBit
+	.hword (0x17<<8)|CBit|NBit|VBit
+	.hword (0x18<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x19<<8)|CBit|NBit     |Bit3
+	.hword (0x20<<8)|CBit|NBit               |Bit5
+	.hword (0x21<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x22<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x23<<8)|CBit|NBit               |Bit5
+	.hword (0x24<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x25<<8)|CBit|NBit               |Bit5
+	.hword (0x26<<8)|CBit|NBit               |Bit5
+	.hword (0x27<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x28<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x29<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x24<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x25<<8)|CBit|NBit               |Bit5
+	.hword (0x26<<8)|CBit|NBit               |Bit5
+	.hword (0x27<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x28<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x29<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x30<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x31<<8)|CBit|NBit               |Bit5
+	.hword (0x32<<8)|CBit|NBit               |Bit5
+	.hword (0x33<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x34<<8)|CBit|NBit               |Bit5
+	.hword (0x35<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x36<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x37<<8)|CBit|NBit               |Bit5
+	.hword (0x38<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x39<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x34<<8)|CBit|NBit               |Bit5
+	.hword (0x35<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x36<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x37<<8)|CBit|NBit               |Bit5
+	.hword (0x38<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x39<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x40<<8)|CBit|NBit
+	.hword (0x41<<8)|CBit|NBit|VBit
+	.hword (0x42<<8)|CBit|NBit|VBit
+	.hword (0x43<<8)|CBit|NBit
+	.hword (0x44<<8)|CBit|NBit|VBit
+	.hword (0x45<<8)|CBit|NBit
+	.hword (0x46<<8)|CBit|NBit
+	.hword (0x47<<8)|CBit|NBit|VBit
+	.hword (0x48<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x49<<8)|CBit|NBit     |Bit3
+	.hword (0x44<<8)|CBit|NBit|VBit
+	.hword (0x45<<8)|CBit|NBit
+	.hword (0x46<<8)|CBit|NBit
+	.hword (0x47<<8)|CBit|NBit|VBit
+	.hword (0x48<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x49<<8)|CBit|NBit     |Bit3
+	.hword (0x50<<8)|CBit|NBit|VBit
+	.hword (0x51<<8)|CBit|NBit
+	.hword (0x52<<8)|CBit|NBit
+	.hword (0x53<<8)|CBit|NBit|VBit
+	.hword (0x54<<8)|CBit|NBit
+	.hword (0x55<<8)|CBit|NBit|VBit
+	.hword (0x56<<8)|CBit|NBit|VBit
+	.hword (0x57<<8)|CBit|NBit
+	.hword (0x58<<8)|CBit|NBit     |Bit3
+	.hword (0x59<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x54<<8)|CBit|NBit
+	.hword (0x55<<8)|CBit|NBit|VBit
+	.hword (0x56<<8)|CBit|NBit|VBit
+	.hword (0x57<<8)|CBit|NBit
+	.hword (0x58<<8)|CBit|NBit     |Bit3
+	.hword (0x59<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x60<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x61<<8)|CBit|NBit               |Bit5
+	.hword (0x62<<8)|CBit|NBit               |Bit5
+	.hword (0x63<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x64<<8)|CBit|NBit               |Bit5
+	.hword (0x65<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x66<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x67<<8)|CBit|NBit               |Bit5
+	.hword (0x68<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x69<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x64<<8)|CBit|NBit               |Bit5
+	.hword (0x65<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x66<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x67<<8)|CBit|NBit               |Bit5
+	.hword (0x68<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x69<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x70<<8)|CBit|NBit               |Bit5
+	.hword (0x71<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x72<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x73<<8)|CBit|NBit               |Bit5
+	.hword (0x74<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x75<<8)|CBit|NBit               |Bit5
+	.hword (0x76<<8)|CBit|NBit               |Bit5
+	.hword (0x77<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x78<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x79<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x74<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x75<<8)|CBit|NBit               |Bit5
+	.hword (0x76<<8)|CBit|NBit               |Bit5
+	.hword (0x77<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x78<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x79<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x80<<8)|CBit|NBit                         |SBit
+	.hword (0x81<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x82<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x83<<8)|CBit|NBit                         |SBit
+	.hword (0x84<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x85<<8)|CBit|NBit                         |SBit
+	.hword (0x86<<8)|CBit|NBit                         |SBit
+	.hword (0x87<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x88<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0x89<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x84<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x85<<8)|CBit|NBit                         |SBit
+	.hword (0x86<<8)|CBit|NBit                         |SBit
+	.hword (0x87<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x88<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0x89<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x90<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x91<<8)|CBit|NBit                         |SBit
+	.hword (0x92<<8)|CBit|NBit                         |SBit
+	.hword (0x93<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x94<<8)|CBit|NBit                         |SBit
+	.hword (0x95<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x96<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x97<<8)|CBit|NBit                         |SBit
+	.hword (0x98<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x99<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0x94<<8)|CBit|NBit                         |SBit
+	.hword (0x95<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x96<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x97<<8)|CBit|NBit                         |SBit
+	.hword (0x98<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x99<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0xfa<<8)     |NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xfb<<8)     |NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xfc<<8)     |NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xfd<<8)     |NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xfe<<8)     |NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xff<<8)     |NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0x00<<8)     |NBit|VBit               |ZBit
+	.hword (0x01<<8)     |NBit
+	.hword (0x02<<8)     |NBit
+	.hword (0x03<<8)     |NBit|VBit
+	.hword (0x04<<8)     |NBit
+	.hword (0x05<<8)     |NBit|VBit
+	.hword (0x06<<8)     |NBit|VBit
+	.hword (0x07<<8)     |NBit
+	.hword (0x08<<8)     |NBit     |Bit3
+	.hword (0x09<<8)     |NBit|VBit|Bit3
+	.hword (0x0a<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x0b<<8)     |NBit     |Bit3|HBit
+	.hword (0x0c<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x0d<<8)     |NBit     |Bit3|HBit
+	.hword (0x0e<<8)     |NBit     |Bit3|HBit
+	.hword (0x0f<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x10<<8)     |NBit
+	.hword (0x11<<8)     |NBit|VBit
+	.hword (0x12<<8)     |NBit|VBit
+	.hword (0x13<<8)     |NBit
+	.hword (0x14<<8)     |NBit|VBit
+	.hword (0x15<<8)     |NBit
+	.hword (0x16<<8)     |NBit
+	.hword (0x17<<8)     |NBit|VBit
+	.hword (0x18<<8)     |NBit|VBit|Bit3
+	.hword (0x19<<8)     |NBit     |Bit3
+	.hword (0x1a<<8)     |NBit     |Bit3|HBit
+	.hword (0x1b<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x1c<<8)     |NBit     |Bit3|HBit
+	.hword (0x1d<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x1e<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x1f<<8)     |NBit     |Bit3|HBit
+	.hword (0x20<<8)     |NBit               |Bit5
+	.hword (0x21<<8)     |NBit|VBit          |Bit5
+	.hword (0x22<<8)     |NBit|VBit          |Bit5
+	.hword (0x23<<8)     |NBit               |Bit5
+	.hword (0x24<<8)     |NBit|VBit          |Bit5
+	.hword (0x25<<8)     |NBit               |Bit5
+	.hword (0x26<<8)     |NBit               |Bit5
+	.hword (0x27<<8)     |NBit|VBit          |Bit5
+	.hword (0x28<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x29<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x2a<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x2b<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x2c<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x2d<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x2e<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x2f<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x30<<8)     |NBit|VBit          |Bit5
+	.hword (0x31<<8)     |NBit               |Bit5
+	.hword (0x32<<8)     |NBit               |Bit5
+	.hword (0x33<<8)     |NBit|VBit          |Bit5
+	.hword (0x34<<8)     |NBit               |Bit5
+	.hword (0x35<<8)     |NBit|VBit          |Bit5
+	.hword (0x36<<8)     |NBit|VBit          |Bit5
+	.hword (0x37<<8)     |NBit               |Bit5
+	.hword (0x38<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x39<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x3a<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x3b<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x3c<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x3d<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x3e<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x3f<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x40<<8)     |NBit
+	.hword (0x41<<8)     |NBit|VBit
+	.hword (0x42<<8)     |NBit|VBit
+	.hword (0x43<<8)     |NBit
+	.hword (0x44<<8)     |NBit|VBit
+	.hword (0x45<<8)     |NBit
+	.hword (0x46<<8)     |NBit
+	.hword (0x47<<8)     |NBit|VBit
+	.hword (0x48<<8)     |NBit|VBit|Bit3
+	.hword (0x49<<8)     |NBit     |Bit3
+	.hword (0x4a<<8)     |NBit     |Bit3|HBit
+	.hword (0x4b<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x4c<<8)     |NBit     |Bit3|HBit
+	.hword (0x4d<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x4e<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x4f<<8)     |NBit     |Bit3|HBit
+	.hword (0x50<<8)     |NBit|VBit
+	.hword (0x51<<8)     |NBit
+	.hword (0x52<<8)     |NBit
+	.hword (0x53<<8)     |NBit|VBit
+	.hword (0x54<<8)     |NBit
+	.hword (0x55<<8)     |NBit|VBit
+	.hword (0x56<<8)     |NBit|VBit
+	.hword (0x57<<8)     |NBit
+	.hword (0x58<<8)     |NBit     |Bit3
+	.hword (0x59<<8)     |NBit|VBit|Bit3
+	.hword (0x5a<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x5b<<8)     |NBit     |Bit3|HBit
+	.hword (0x5c<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x5d<<8)     |NBit     |Bit3|HBit
+	.hword (0x5e<<8)     |NBit     |Bit3|HBit
+	.hword (0x5f<<8)     |NBit|VBit|Bit3|HBit
+	.hword (0x60<<8)     |NBit|VBit          |Bit5
+	.hword (0x61<<8)     |NBit               |Bit5
+	.hword (0x62<<8)     |NBit               |Bit5
+	.hword (0x63<<8)     |NBit|VBit          |Bit5
+	.hword (0x64<<8)     |NBit               |Bit5
+	.hword (0x65<<8)     |NBit|VBit          |Bit5
+	.hword (0x66<<8)     |NBit|VBit          |Bit5
+	.hword (0x67<<8)     |NBit               |Bit5
+	.hword (0x68<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x69<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x6a<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x6b<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x6c<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x6d<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x6e<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x6f<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x70<<8)     |NBit               |Bit5
+	.hword (0x71<<8)     |NBit|VBit          |Bit5
+	.hword (0x72<<8)     |NBit|VBit          |Bit5
+	.hword (0x73<<8)     |NBit               |Bit5
+	.hword (0x74<<8)     |NBit|VBit          |Bit5
+	.hword (0x75<<8)     |NBit               |Bit5
+	.hword (0x76<<8)     |NBit               |Bit5
+	.hword (0x77<<8)     |NBit|VBit          |Bit5
+	.hword (0x78<<8)     |NBit|VBit|Bit3     |Bit5
+	.hword (0x79<<8)     |NBit     |Bit3     |Bit5
+	.hword (0x7a<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x7b<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x7c<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x7d<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x7e<<8)     |NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x7f<<8)     |NBit     |Bit3|HBit|Bit5
+	.hword (0x80<<8)     |NBit                         |SBit
+	.hword (0x81<<8)     |NBit|VBit                    |SBit
+	.hword (0x82<<8)     |NBit|VBit                    |SBit
+	.hword (0x83<<8)     |NBit                         |SBit
+	.hword (0x84<<8)     |NBit|VBit                    |SBit
+	.hword (0x85<<8)     |NBit                         |SBit
+	.hword (0x86<<8)     |NBit                         |SBit
+	.hword (0x87<<8)     |NBit|VBit                    |SBit
+	.hword (0x88<<8)     |NBit|VBit|Bit3               |SBit
+	.hword (0x89<<8)     |NBit     |Bit3               |SBit
+	.hword (0x8a<<8)     |NBit     |Bit3|HBit          |SBit
+	.hword (0x8b<<8)     |NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x8c<<8)     |NBit     |Bit3|HBit          |SBit
+	.hword (0x8d<<8)     |NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x8e<<8)     |NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x8f<<8)     |NBit     |Bit3|HBit          |SBit
+	.hword (0x90<<8)     |NBit|VBit                    |SBit
+	.hword (0x91<<8)     |NBit                         |SBit
+	.hword (0x92<<8)     |NBit                         |SBit
+	.hword (0x93<<8)     |NBit|VBit                    |SBit
+	.hword (0x34<<8)|CBit|NBit               |Bit5
+	.hword (0x35<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x36<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x37<<8)|CBit|NBit               |Bit5
+	.hword (0x38<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x39<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x3a<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x3b<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x3c<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x3d<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x3e<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x3f<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x40<<8)|CBit|NBit
+	.hword (0x41<<8)|CBit|NBit|VBit
+	.hword (0x42<<8)|CBit|NBit|VBit
+	.hword (0x43<<8)|CBit|NBit
+	.hword (0x44<<8)|CBit|NBit|VBit
+	.hword (0x45<<8)|CBit|NBit
+	.hword (0x46<<8)|CBit|NBit
+	.hword (0x47<<8)|CBit|NBit|VBit
+	.hword (0x48<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x49<<8)|CBit|NBit     |Bit3
+	.hword (0x4a<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x4b<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x4c<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x4d<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x4e<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x4f<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x50<<8)|CBit|NBit|VBit
+	.hword (0x51<<8)|CBit|NBit
+	.hword (0x52<<8)|CBit|NBit
+	.hword (0x53<<8)|CBit|NBit|VBit
+	.hword (0x54<<8)|CBit|NBit
+	.hword (0x55<<8)|CBit|NBit|VBit
+	.hword (0x56<<8)|CBit|NBit|VBit
+	.hword (0x57<<8)|CBit|NBit
+	.hword (0x58<<8)|CBit|NBit     |Bit3
+	.hword (0x59<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x5a<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x5b<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x5c<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x5d<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x5e<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x5f<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x60<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x61<<8)|CBit|NBit               |Bit5
+	.hword (0x62<<8)|CBit|NBit               |Bit5
+	.hword (0x63<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x64<<8)|CBit|NBit               |Bit5
+	.hword (0x65<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x66<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x67<<8)|CBit|NBit               |Bit5
+	.hword (0x68<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x69<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x6a<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x6b<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x6c<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x6d<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x6e<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x6f<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x70<<8)|CBit|NBit               |Bit5
+	.hword (0x71<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x72<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x73<<8)|CBit|NBit               |Bit5
+	.hword (0x74<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x75<<8)|CBit|NBit               |Bit5
+	.hword (0x76<<8)|CBit|NBit               |Bit5
+	.hword (0x77<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x78<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x79<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x7a<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x7b<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x7c<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x7d<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x7e<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x7f<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x80<<8)|CBit|NBit                         |SBit
+	.hword (0x81<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x82<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x83<<8)|CBit|NBit                         |SBit
+	.hword (0x84<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x85<<8)|CBit|NBit                         |SBit
+	.hword (0x86<<8)|CBit|NBit                         |SBit
+	.hword (0x87<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x88<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0x89<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x8a<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0x8b<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x8c<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0x8d<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x8e<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x8f<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0x90<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x91<<8)|CBit|NBit                         |SBit
+	.hword (0x92<<8)|CBit|NBit                         |SBit
+	.hword (0x93<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x94<<8)|CBit|NBit                         |SBit
+	.hword (0x95<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x96<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x97<<8)|CBit|NBit                         |SBit
+	.hword (0x98<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x99<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0x9a<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x9b<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0x9c<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x9d<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0x9e<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0x9f<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0xa0<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xa1<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xa2<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xa3<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xa4<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xa5<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xa6<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xa7<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xa8<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xa9<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xaa<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xab<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xac<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xad<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xae<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xaf<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xb0<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xb1<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xb2<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xb3<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xb4<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xb5<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xb6<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xb7<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xb8<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xb9<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xba<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xbb<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xbc<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xbd<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xbe<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xbf<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xc0<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xc1<<8)|CBit|NBit                         |SBit
+	.hword (0xc2<<8)|CBit|NBit                         |SBit
+	.hword (0xc3<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xc4<<8)|CBit|NBit                         |SBit
+	.hword (0xc5<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xc6<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xc7<<8)|CBit|NBit                         |SBit
+	.hword (0xc8<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0xc9<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0xca<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0xcb<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0xcc<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0xcd<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0xce<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0xcf<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0xd0<<8)|CBit|NBit                         |SBit
+	.hword (0xd1<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xd2<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xd3<<8)|CBit|NBit                         |SBit
+	.hword (0xd4<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xd5<<8)|CBit|NBit                         |SBit
+	.hword (0xd6<<8)|CBit|NBit                         |SBit
+	.hword (0xd7<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0xd8<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0xd9<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0xda<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0xdb<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0xdc<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0xdd<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0xde<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0xdf<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0xe0<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xe1<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xe2<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xe3<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xe4<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xe5<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xe6<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xe7<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xe8<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xe9<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xea<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xeb<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xec<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xed<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xee<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xef<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xf0<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xf1<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xf2<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xf3<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xf4<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xf5<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xf6<<8)|CBit|NBit|VBit          |Bit5     |SBit
+	.hword (0xf7<<8)|CBit|NBit               |Bit5     |SBit
+	.hword (0xf8<<8)|CBit|NBit     |Bit3     |Bit5     |SBit
+	.hword (0xf9<<8)|CBit|NBit|VBit|Bit3     |Bit5     |SBit
+	.hword (0xfa<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xfb<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xfc<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0xfd<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xfe<<8)|CBit|NBit     |Bit3|HBit|Bit5     |SBit
+	.hword (0xff<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit
+	.hword (0x00<<8)|CBit|NBit|VBit               |ZBit
+	.hword (0x01<<8)|CBit|NBit
+	.hword (0x02<<8)|CBit|NBit
+	.hword (0x03<<8)|CBit|NBit|VBit
+	.hword (0x04<<8)|CBit|NBit
+	.hword (0x05<<8)|CBit|NBit|VBit
+	.hword (0x06<<8)|CBit|NBit|VBit
+	.hword (0x07<<8)|CBit|NBit
+	.hword (0x08<<8)|CBit|NBit     |Bit3
+	.hword (0x09<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x0a<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x0b<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x0c<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x0d<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x0e<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x0f<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x10<<8)|CBit|NBit
+	.hword (0x11<<8)|CBit|NBit|VBit
+	.hword (0x12<<8)|CBit|NBit|VBit
+	.hword (0x13<<8)|CBit|NBit
+	.hword (0x14<<8)|CBit|NBit|VBit
+	.hword (0x15<<8)|CBit|NBit
+	.hword (0x16<<8)|CBit|NBit
+	.hword (0x17<<8)|CBit|NBit|VBit
+	.hword (0x18<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x19<<8)|CBit|NBit     |Bit3
+	.hword (0x1a<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x1b<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x1c<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x1d<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x1e<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x1f<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x20<<8)|CBit|NBit               |Bit5
+	.hword (0x21<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x22<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x23<<8)|CBit|NBit               |Bit5
+	.hword (0x24<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x25<<8)|CBit|NBit               |Bit5
+	.hword (0x26<<8)|CBit|NBit               |Bit5
+	.hword (0x27<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x28<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x29<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x2a<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x2b<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x2c<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x2d<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x2e<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x2f<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x30<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x31<<8)|CBit|NBit               |Bit5
+	.hword (0x32<<8)|CBit|NBit               |Bit5
+	.hword (0x33<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x34<<8)|CBit|NBit               |Bit5
+	.hword (0x35<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x36<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x37<<8)|CBit|NBit               |Bit5
+	.hword (0x38<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x39<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x3a<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x3b<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x3c<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x3d<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x3e<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x3f<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x40<<8)|CBit|NBit
+	.hword (0x41<<8)|CBit|NBit|VBit
+	.hword (0x42<<8)|CBit|NBit|VBit
+	.hword (0x43<<8)|CBit|NBit
+	.hword (0x44<<8)|CBit|NBit|VBit
+	.hword (0x45<<8)|CBit|NBit
+	.hword (0x46<<8)|CBit|NBit
+	.hword (0x47<<8)|CBit|NBit|VBit
+	.hword (0x48<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x49<<8)|CBit|NBit     |Bit3
+	.hword (0x4a<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x4b<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x4c<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x4d<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x4e<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x4f<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x50<<8)|CBit|NBit|VBit
+	.hword (0x51<<8)|CBit|NBit
+	.hword (0x52<<8)|CBit|NBit
+	.hword (0x53<<8)|CBit|NBit|VBit
+	.hword (0x54<<8)|CBit|NBit
+	.hword (0x55<<8)|CBit|NBit|VBit
+	.hword (0x56<<8)|CBit|NBit|VBit
+	.hword (0x57<<8)|CBit|NBit
+	.hword (0x58<<8)|CBit|NBit     |Bit3
+	.hword (0x59<<8)|CBit|NBit|VBit|Bit3
+	.hword (0x5a<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x5b<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x5c<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x5d<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x5e<<8)|CBit|NBit     |Bit3|HBit
+	.hword (0x5f<<8)|CBit|NBit|VBit|Bit3|HBit
+	.hword (0x60<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x61<<8)|CBit|NBit               |Bit5
+	.hword (0x62<<8)|CBit|NBit               |Bit5
+	.hword (0x63<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x64<<8)|CBit|NBit               |Bit5
+	.hword (0x65<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x66<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x67<<8)|CBit|NBit               |Bit5
+	.hword (0x68<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x69<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x6a<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x6b<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x6c<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x6d<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x6e<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x6f<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x70<<8)|CBit|NBit               |Bit5
+	.hword (0x71<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x72<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x73<<8)|CBit|NBit               |Bit5
+	.hword (0x74<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x75<<8)|CBit|NBit               |Bit5
+	.hword (0x76<<8)|CBit|NBit               |Bit5
+	.hword (0x77<<8)|CBit|NBit|VBit          |Bit5
+	.hword (0x78<<8)|CBit|NBit|VBit|Bit3     |Bit5
+	.hword (0x79<<8)|CBit|NBit     |Bit3     |Bit5
+	.hword (0x7a<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x7b<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x7c<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x7d<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x7e<<8)|CBit|NBit|VBit|Bit3|HBit|Bit5
+	.hword (0x7f<<8)|CBit|NBit     |Bit3|HBit|Bit5
+	.hword (0x80<<8)|CBit|NBit                         |SBit
+	.hword (0x81<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x82<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x83<<8)|CBit|NBit                         |SBit
+	.hword (0x84<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x85<<8)|CBit|NBit                         |SBit
+	.hword (0x86<<8)|CBit|NBit                         |SBit
+	.hword (0x87<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x88<<8)|CBit|NBit|VBit|Bit3               |SBit
+	.hword (0x89<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x8a<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0x8b<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x8c<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0x8d<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x8e<<8)|CBit|NBit|VBit|Bit3|HBit          |SBit
+	.hword (0x8f<<8)|CBit|NBit     |Bit3|HBit          |SBit
+	.hword (0x90<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x91<<8)|CBit|NBit                         |SBit
+	.hword (0x92<<8)|CBit|NBit                         |SBit
+	.hword (0x93<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x94<<8)|CBit|NBit                         |SBit
+	.hword (0x95<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x96<<8)|CBit|NBit|VBit                    |SBit
+	.hword (0x97<<8)|CBit|NBit                         |SBit
+	.hword (0x98<<8)|CBit|NBit     |Bit3               |SBit
+	.hword (0x99<<8)|CBit|NBit|VBit|Bit3               |SBit
 
 .align 4
 
-AF_ARM:  .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 0
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 1
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 2
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 3
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 4
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 5
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 6
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 7
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 8
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 9
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 10
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 11
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 12
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 13
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 14
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 15
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 16
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 17
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 18
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 19
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 20
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 21
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 22
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 23
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 24
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 25
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 26
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 27
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 28
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 29
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 30
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 31
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 32
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 33
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 34
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 35
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 36
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 37
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 38
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 39
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 40
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 41
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 42
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 43
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 44
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 45
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 46
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 47
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 48
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 49
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 50
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 51
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 52
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 53
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 54
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 55
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 56
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 57
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 58
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 59
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 60
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 61
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 62
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(0<<SFlag)  ;@ 63
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 64
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 65
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 66
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 67
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 68
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 69
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 70
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 71
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 72
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 73
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 74
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 75
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 76
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 77
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 78
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 79
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 80
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 81
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 82
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 83
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 84
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 85
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 86
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 87
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 88
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 89
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 90
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 91
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 92
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 93
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 94
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 95
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 96
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 97
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 98
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 99
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 100
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 101
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 102
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 103
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 104
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 105
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 106
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 107
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 108
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 109
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 110
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 111
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 112
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 113
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 114
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 115
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 116
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 117
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 118
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 119
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 120
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 121
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 122
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 123
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 124
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 125
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 126
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(0<<SFlag)  ;@ 127
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 128
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 129
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 130
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 131
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 132
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 133
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 134
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 135
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 136
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 137
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 138
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 139
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 140
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 141
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 142
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 143
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 144
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 145
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 146
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 147
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 148
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 149
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 150
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 151
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 152
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 153
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 154
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 155
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 156
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 157
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 158
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 159
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 160
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 161
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 162
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 163
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 164
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 165
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 166
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 167
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 168
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 169
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 170
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 171
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 172
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 173
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 174
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 175
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 176
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 177
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 178
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 179
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 180
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 181
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 182
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 183
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 184
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 185
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 186
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 187
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 188
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 189
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 190
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(0<<ZFlag)|(1<<SFlag)  ;@ 191
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 192
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 193
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 194
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 195
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 196
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 197
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 198
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 199
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 200
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 201
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 202
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 203
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 204
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 205
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 206
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 207
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 208
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 209
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 210
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 211
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 212
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 213
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 214
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 215
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 216
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 217
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 218
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 219
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 220
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 221
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 222
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 223
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 224
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 225
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 226
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 227
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 228
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 229
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 230
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 231
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 232
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 233
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 234
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 235
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 236
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 237
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 238
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(0<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 239
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 240
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 241
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 242
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 243
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 244
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 245
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 246
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 247
-         .byte (0<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 248
-         .byte (1<<CFlag)|(0<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 249
-         .byte (0<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 250
-         .byte (1<<CFlag)|(1<<NFlag)|(0<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 251
-         .byte (0<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 252
-         .byte (1<<CFlag)|(0<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 253
-         .byte (0<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 254
-         .byte (1<<CFlag)|(1<<NFlag)|(1<<VFlag)|(1<<HFlag)|(1<<ZFlag)|(1<<SFlag)  ;@ 255
+DrARM_Z80:
+	.byte                                                                       0 ;@ 0
+	.byte Z80_VBit                                                                ;@ 1
+	.byte          Z80_CBit                                                       ;@ 2
+	.byte Z80_VBit|Z80_CBit                                                       ;@ 3
+	.byte                   Z80_ZBit                                              ;@ 4
+	.byte Z80_VBit         |Z80_ZBit                                              ;@ 5
+	.byte          Z80_CBit|Z80_ZBit                                              ;@ 6
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit                                              ;@ 7
+	.byte                            Z80_SBit                                     ;@ 8
+	.byte Z80_VBit                  |Z80_SBit                                     ;@ 9
+	.byte          Z80_CBit         |Z80_SBit                                     ;@ 10
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit                                     ;@ 11
+	.byte                   Z80_ZBit|Z80_SBit                                     ;@ 12
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit                                     ;@ 13
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit                                     ;@ 14
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit                                     ;@ 15
+	.byte                                     Z80_HBit                            ;@ 16
+	.byte Z80_VBit                           |Z80_HBit                            ;@ 17
+	.byte          Z80_CBit                  |Z80_HBit                            ;@ 18
+	.byte Z80_VBit|Z80_CBit                  |Z80_HBit                            ;@ 19
+	.byte                   Z80_ZBit         |Z80_HBit                            ;@ 20
+	.byte Z80_VBit         |Z80_ZBit         |Z80_HBit                            ;@ 21
+	.byte          Z80_CBit|Z80_ZBit         |Z80_HBit                            ;@ 22
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit         |Z80_HBit                            ;@ 23
+	.byte                            Z80_SBit|Z80_HBit                            ;@ 24
+	.byte Z80_VBit                  |Z80_SBit|Z80_HBit                            ;@ 25
+	.byte          Z80_CBit         |Z80_SBit|Z80_HBit                            ;@ 26
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit|Z80_HBit                            ;@ 27
+	.byte                   Z80_ZBit|Z80_SBit|Z80_HBit                            ;@ 28
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit|Z80_HBit                            ;@ 29
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit                            ;@ 30
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit                            ;@ 31
+	.byte                                              Z80_Bit3                   ;@ 32
+	.byte Z80_VBit                                    |Z80_Bit3                   ;@ 33
+	.byte          Z80_CBit                           |Z80_Bit3                   ;@ 34
+	.byte Z80_VBit|Z80_CBit                           |Z80_Bit3                   ;@ 35
+	.byte                   Z80_ZBit                  |Z80_Bit3                   ;@ 36
+	.byte Z80_VBit         |Z80_ZBit                  |Z80_Bit3                   ;@ 37
+	.byte          Z80_CBit|Z80_ZBit                  |Z80_Bit3                   ;@ 38
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit                  |Z80_Bit3                   ;@ 39
+	.byte                            Z80_SBit         |Z80_Bit3                   ;@ 40
+	.byte Z80_VBit                  |Z80_SBit         |Z80_Bit3                   ;@ 41
+	.byte          Z80_CBit         |Z80_SBit         |Z80_Bit3                   ;@ 42
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit         |Z80_Bit3                   ;@ 43
+	.byte                   Z80_ZBit|Z80_SBit         |Z80_Bit3                   ;@ 44
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit         |Z80_Bit3                   ;@ 45
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit         |Z80_Bit3                   ;@ 46
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit         |Z80_Bit3                   ;@ 47
+	.byte                                     Z80_HBit|Z80_Bit3                   ;@ 48
+	.byte Z80_VBit                           |Z80_HBit|Z80_Bit3                   ;@ 49
+	.byte          Z80_CBit                  |Z80_HBit|Z80_Bit3                   ;@ 50
+	.byte Z80_VBit|Z80_CBit                  |Z80_HBit|Z80_Bit3                   ;@ 51
+	.byte                   Z80_ZBit         |Z80_HBit|Z80_Bit3                   ;@ 52
+	.byte Z80_VBit         |Z80_ZBit         |Z80_HBit|Z80_Bit3                   ;@ 53
+	.byte          Z80_CBit|Z80_ZBit         |Z80_HBit|Z80_Bit3                   ;@ 54
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit         |Z80_HBit|Z80_Bit3                   ;@ 55
+	.byte                            Z80_SBit|Z80_HBit|Z80_Bit3                   ;@ 56
+	.byte Z80_VBit                  |Z80_SBit|Z80_HBit|Z80_Bit3                   ;@ 57
+	.byte          Z80_CBit         |Z80_SBit|Z80_HBit|Z80_Bit3                   ;@ 58
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit|Z80_HBit|Z80_Bit3                   ;@ 59
+	.byte                   Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3                   ;@ 60
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3                   ;@ 61
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3                   ;@ 62
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3                   ;@ 63
+	.byte                                                       Z80_NBit          ;@ 64
+	.byte Z80_VBit                                             |Z80_NBit          ;@ 65
+	.byte          Z80_CBit                                    |Z80_NBit          ;@ 66
+	.byte Z80_VBit|Z80_CBit                                    |Z80_NBit          ;@ 67
+	.byte                   Z80_ZBit                           |Z80_NBit          ;@ 68
+	.byte Z80_VBit         |Z80_ZBit                           |Z80_NBit          ;@ 69
+	.byte          Z80_CBit|Z80_ZBit                           |Z80_NBit          ;@ 70
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit                           |Z80_NBit          ;@ 71
+	.byte                            Z80_SBit                  |Z80_NBit          ;@ 72
+	.byte Z80_VBit                  |Z80_SBit                  |Z80_NBit          ;@ 73
+	.byte          Z80_CBit         |Z80_SBit                  |Z80_NBit          ;@ 74
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit                  |Z80_NBit          ;@ 75
+	.byte                   Z80_ZBit|Z80_SBit                  |Z80_NBit          ;@ 76
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit                  |Z80_NBit          ;@ 77
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit                  |Z80_NBit          ;@ 78
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit                  |Z80_NBit          ;@ 79
+	.byte                                     Z80_HBit         |Z80_NBit          ;@ 80
+	.byte Z80_VBit                           |Z80_HBit         |Z80_NBit          ;@ 81
+	.byte          Z80_CBit                  |Z80_HBit         |Z80_NBit          ;@ 82
+	.byte Z80_VBit|Z80_CBit                  |Z80_HBit         |Z80_NBit          ;@ 83
+	.byte                   Z80_ZBit         |Z80_HBit         |Z80_NBit          ;@ 84
+	.byte Z80_VBit         |Z80_ZBit         |Z80_HBit         |Z80_NBit          ;@ 85
+	.byte          Z80_CBit|Z80_ZBit         |Z80_HBit         |Z80_NBit          ;@ 86
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit         |Z80_HBit         |Z80_NBit          ;@ 87
+	.byte                            Z80_SBit|Z80_HBit         |Z80_NBit          ;@ 88
+	.byte Z80_VBit                  |Z80_SBit|Z80_HBit         |Z80_NBit          ;@ 89
+	.byte          Z80_CBit         |Z80_SBit|Z80_HBit         |Z80_NBit          ;@ 90
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit|Z80_HBit         |Z80_NBit          ;@ 91
+	.byte                   Z80_ZBit|Z80_SBit|Z80_HBit         |Z80_NBit          ;@ 92
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit|Z80_HBit         |Z80_NBit          ;@ 93
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit         |Z80_NBit          ;@ 94
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit         |Z80_NBit          ;@ 95
+	.byte                                              Z80_Bit3|Z80_NBit          ;@ 96
+	.byte Z80_VBit                                    |Z80_Bit3|Z80_NBit          ;@ 97
+	.byte          Z80_CBit                           |Z80_Bit3|Z80_NBit          ;@ 98
+	.byte Z80_VBit|Z80_CBit                           |Z80_Bit3|Z80_NBit          ;@ 99
+	.byte                   Z80_ZBit                  |Z80_Bit3|Z80_NBit          ;@ 100
+	.byte Z80_VBit         |Z80_ZBit                  |Z80_Bit3|Z80_NBit          ;@ 101
+	.byte          Z80_CBit|Z80_ZBit                  |Z80_Bit3|Z80_NBit          ;@ 102
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit                  |Z80_Bit3|Z80_NBit          ;@ 103
+	.byte                            Z80_SBit         |Z80_Bit3|Z80_NBit          ;@ 104
+	.byte Z80_VBit                  |Z80_SBit         |Z80_Bit3|Z80_NBit          ;@ 105
+	.byte          Z80_CBit         |Z80_SBit         |Z80_Bit3|Z80_NBit          ;@ 106
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit         |Z80_Bit3|Z80_NBit          ;@ 107
+	.byte                   Z80_ZBit|Z80_SBit         |Z80_Bit3|Z80_NBit          ;@ 108
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit         |Z80_Bit3|Z80_NBit          ;@ 109
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit         |Z80_Bit3|Z80_NBit          ;@ 110
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit         |Z80_Bit3|Z80_NBit          ;@ 111
+	.byte                                     Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 112
+	.byte Z80_VBit                           |Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 113
+	.byte          Z80_CBit                  |Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 114
+	.byte Z80_VBit|Z80_CBit                  |Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 115
+	.byte                   Z80_ZBit         |Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 116
+	.byte Z80_VBit         |Z80_ZBit         |Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 117
+	.byte          Z80_CBit|Z80_ZBit         |Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 118
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit         |Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 119
+	.byte                            Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 120
+	.byte Z80_VBit                  |Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 121
+	.byte          Z80_CBit         |Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 122
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 123
+	.byte                   Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 124
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 125
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 126
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit          ;@ 127
+	.byte                                                                Z80_Bit5 ;@ 128
+	.byte Z80_VBit                                                      |Z80_Bit5 ;@ 129
+	.byte          Z80_CBit                                             |Z80_Bit5 ;@ 130
+	.byte Z80_VBit|Z80_CBit                                             |Z80_Bit5 ;@ 131
+	.byte                   Z80_ZBit                                    |Z80_Bit5 ;@ 132
+	.byte Z80_VBit         |Z80_ZBit                                    |Z80_Bit5 ;@ 133
+	.byte          Z80_CBit|Z80_ZBit                                    |Z80_Bit5 ;@ 134
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit                                    |Z80_Bit5 ;@ 135
+	.byte                            Z80_SBit                           |Z80_Bit5 ;@ 136
+	.byte Z80_VBit                  |Z80_SBit                           |Z80_Bit5 ;@ 137
+	.byte          Z80_CBit         |Z80_SBit                           |Z80_Bit5 ;@ 138
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit                           |Z80_Bit5 ;@ 139
+	.byte                   Z80_ZBit|Z80_SBit                           |Z80_Bit5 ;@ 140
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit                           |Z80_Bit5 ;@ 141
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit                           |Z80_Bit5 ;@ 142
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit                           |Z80_Bit5 ;@ 143
+	.byte                                     Z80_HBit                  |Z80_Bit5 ;@ 144
+	.byte Z80_VBit                           |Z80_HBit                  |Z80_Bit5 ;@ 145
+	.byte          Z80_CBit                  |Z80_HBit                  |Z80_Bit5 ;@ 146
+	.byte Z80_VBit|Z80_CBit                  |Z80_HBit                  |Z80_Bit5 ;@ 147
+	.byte                   Z80_ZBit         |Z80_HBit                  |Z80_Bit5 ;@ 148
+	.byte Z80_VBit         |Z80_ZBit         |Z80_HBit                  |Z80_Bit5 ;@ 149
+	.byte          Z80_CBit|Z80_ZBit         |Z80_HBit                  |Z80_Bit5 ;@ 150
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit         |Z80_HBit                  |Z80_Bit5 ;@ 151
+	.byte                            Z80_SBit|Z80_HBit                  |Z80_Bit5 ;@ 152
+	.byte Z80_VBit                  |Z80_SBit|Z80_HBit                  |Z80_Bit5 ;@ 153
+	.byte          Z80_CBit         |Z80_SBit|Z80_HBit                  |Z80_Bit5 ;@ 154
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit|Z80_HBit                  |Z80_Bit5 ;@ 155
+	.byte                   Z80_ZBit|Z80_SBit|Z80_HBit                  |Z80_Bit5 ;@ 156
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit|Z80_HBit                  |Z80_Bit5 ;@ 157
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit                  |Z80_Bit5 ;@ 158
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit                  |Z80_Bit5 ;@ 159
+	.byte                                              Z80_Bit3         |Z80_Bit5 ;@ 160
+	.byte Z80_VBit                                    |Z80_Bit3         |Z80_Bit5 ;@ 161
+	.byte          Z80_CBit                           |Z80_Bit3         |Z80_Bit5 ;@ 162
+	.byte Z80_VBit|Z80_CBit                           |Z80_Bit3         |Z80_Bit5 ;@ 163
+	.byte                   Z80_ZBit                  |Z80_Bit3         |Z80_Bit5 ;@ 164
+	.byte Z80_VBit         |Z80_ZBit                  |Z80_Bit3         |Z80_Bit5 ;@ 165
+	.byte          Z80_CBit|Z80_ZBit                  |Z80_Bit3         |Z80_Bit5 ;@ 166
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit                  |Z80_Bit3         |Z80_Bit5 ;@ 167
+	.byte                            Z80_SBit         |Z80_Bit3         |Z80_Bit5 ;@ 168
+	.byte Z80_VBit                  |Z80_SBit         |Z80_Bit3         |Z80_Bit5 ;@ 169
+	.byte          Z80_CBit         |Z80_SBit         |Z80_Bit3         |Z80_Bit5 ;@ 170
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit         |Z80_Bit3         |Z80_Bit5 ;@ 171
+	.byte                   Z80_ZBit|Z80_SBit         |Z80_Bit3         |Z80_Bit5 ;@ 172
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit         |Z80_Bit3         |Z80_Bit5 ;@ 173
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit         |Z80_Bit3         |Z80_Bit5 ;@ 174
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit         |Z80_Bit3         |Z80_Bit5 ;@ 175
+	.byte                                     Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 176
+	.byte Z80_VBit                           |Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 177
+	.byte          Z80_CBit                  |Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 178
+	.byte Z80_VBit|Z80_CBit                  |Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 179
+	.byte                   Z80_ZBit         |Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 180
+	.byte Z80_VBit         |Z80_ZBit         |Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 181
+	.byte          Z80_CBit|Z80_ZBit         |Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 182
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit         |Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 183
+	.byte                            Z80_SBit|Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 184
+	.byte Z80_VBit                  |Z80_SBit|Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 185
+	.byte          Z80_CBit         |Z80_SBit|Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 186
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit|Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 187
+	.byte                   Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 188
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 189
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 190
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3         |Z80_Bit5 ;@ 191
+	.byte                                                       Z80_NBit|Z80_Bit5 ;@ 192
+	.byte Z80_VBit                                             |Z80_NBit|Z80_Bit5 ;@ 193
+	.byte          Z80_CBit                                    |Z80_NBit|Z80_Bit5 ;@ 194
+	.byte Z80_VBit|Z80_CBit                                    |Z80_NBit|Z80_Bit5 ;@ 195
+	.byte                   Z80_ZBit                           |Z80_NBit|Z80_Bit5 ;@ 196
+	.byte Z80_VBit         |Z80_ZBit                           |Z80_NBit|Z80_Bit5 ;@ 197
+	.byte          Z80_CBit|Z80_ZBit                           |Z80_NBit|Z80_Bit5 ;@ 198
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit                           |Z80_NBit|Z80_Bit5 ;@ 199
+	.byte                            Z80_SBit                  |Z80_NBit|Z80_Bit5 ;@ 200
+	.byte Z80_VBit                  |Z80_SBit                  |Z80_NBit|Z80_Bit5 ;@ 201
+	.byte          Z80_CBit         |Z80_SBit                  |Z80_NBit|Z80_Bit5 ;@ 202
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit                  |Z80_NBit|Z80_Bit5 ;@ 203
+	.byte                   Z80_ZBit|Z80_SBit                  |Z80_NBit|Z80_Bit5 ;@ 204
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit                  |Z80_NBit|Z80_Bit5 ;@ 205
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit                  |Z80_NBit|Z80_Bit5 ;@ 206
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit                  |Z80_NBit|Z80_Bit5 ;@ 207
+	.byte                                     Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 208
+	.byte Z80_VBit                           |Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 209
+	.byte          Z80_CBit                  |Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 210
+	.byte Z80_VBit|Z80_CBit                  |Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 211
+	.byte                   Z80_ZBit         |Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 212
+	.byte Z80_VBit         |Z80_ZBit         |Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 213
+	.byte          Z80_CBit|Z80_ZBit         |Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 214
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit         |Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 215
+	.byte                            Z80_SBit|Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 216
+	.byte Z80_VBit                  |Z80_SBit|Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 217
+	.byte          Z80_CBit         |Z80_SBit|Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 218
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit|Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 219
+	.byte                   Z80_ZBit|Z80_SBit|Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 220
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit|Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 221
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 222
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit         |Z80_NBit|Z80_Bit5 ;@ 223
+	.byte                                              Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 224
+	.byte Z80_VBit                                    |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 225
+	.byte          Z80_CBit                           |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 226
+	.byte Z80_VBit|Z80_CBit                           |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 227
+	.byte                   Z80_ZBit                  |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 228
+	.byte Z80_VBit         |Z80_ZBit                  |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 229
+	.byte          Z80_CBit|Z80_ZBit                  |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 230
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit                  |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 231
+	.byte                            Z80_SBit         |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 232
+	.byte Z80_VBit                  |Z80_SBit         |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 233
+	.byte          Z80_CBit         |Z80_SBit         |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 234
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit         |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 235
+	.byte                   Z80_ZBit|Z80_SBit         |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 236
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit         |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 237
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit         |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 238
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit         |Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 239
+	.byte                                     Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 240
+	.byte Z80_VBit                           |Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 241
+	.byte          Z80_CBit                  |Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 242
+	.byte Z80_VBit|Z80_CBit                  |Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 243
+	.byte                   Z80_ZBit         |Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 244
+	.byte Z80_VBit         |Z80_ZBit         |Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 245
+	.byte          Z80_CBit|Z80_ZBit         |Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 246
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit         |Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 247
+	.byte                            Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 248
+	.byte Z80_VBit                  |Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 249
+	.byte          Z80_CBit         |Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 250
+	.byte Z80_VBit|Z80_CBit         |Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 251
+	.byte                   Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 252
+	.byte Z80_VBit         |Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 253
+	.byte          Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 254
+	.byte Z80_VBit|Z80_CBit|Z80_ZBit|Z80_SBit|Z80_HBit|Z80_Bit3|Z80_NBit|Z80_Bit5 ;@ 255
 
 .align 4
 
-PZSTable_data: .byte (1<<ZFlag)|(1<<VFlag),0,0,(1<<VFlag),0,(1<<VFlag),(1<<VFlag),0
-	.byte  0,(1<<VFlag),(1<<VFlag),0,(1<<VFlag),0,0,(1<<VFlag)
-	.byte  0,(1<<VFlag),(1<<VFlag),0,(1<<VFlag),0,0,(1<<VFlag),(1<<VFlag),0,0,(1<<VFlag),0,(1<<VFlag),(1<<VFlag),0
-	.byte  0,(1<<VFlag),(1<<VFlag),0,(1<<VFlag),0,0,(1<<VFlag),(1<<VFlag),0,0,(1<<VFlag),0,(1<<VFlag),(1<<VFlag),0
-	.byte  (1<<VFlag),0,0,(1<<VFlag),0,(1<<VFlag),(1<<VFlag),0,0,(1<<VFlag),(1<<VFlag),0,(1<<VFlag),0,0,(1<<VFlag)
-	.byte  0,(1<<VFlag),(1<<VFlag),0,(1<<VFlag),0,0,(1<<VFlag),(1<<VFlag),0,0,(1<<VFlag),0,(1<<VFlag),(1<<VFlag),0
-	.byte  (1<<VFlag),0,0,(1<<VFlag),0,(1<<VFlag),(1<<VFlag),0,0,(1<<VFlag),(1<<VFlag),0,(1<<VFlag),0,0,(1<<VFlag)
-	.byte  (1<<VFlag),0,0,(1<<VFlag),0,(1<<VFlag),(1<<VFlag),0,0,(1<<VFlag),(1<<VFlag),0,(1<<VFlag),0,0,(1<<VFlag)
-	.byte  0,(1<<VFlag),(1<<VFlag),0,(1<<VFlag),0,0,(1<<VFlag),(1<<VFlag),0,0,(1<<VFlag),0,(1<<VFlag),(1<<VFlag),0
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)|(1<<VFlag),(1<<SFlag)
-	.byte  (1<<SFlag)|(1<<VFlag),(1<<SFlag),(1<<SFlag),(1<<SFlag)|(1<<VFlag)       
+DrZ80_ARM:
+	.byte                                       0 ;@ 0
+	.byte CBit                                    ;@ 1
+	.byte      NBit                               ;@ 2
+	.byte CBit|NBit                               ;@ 3
+	.byte           VBit                          ;@ 4
+	.byte CBit     |VBit                          ;@ 5
+	.byte      NBit|VBit                          ;@ 6
+	.byte CBit|NBit|VBit                          ;@ 7
+	.byte                Bit3                     ;@ 8
+	.byte CBit          |Bit3                     ;@ 9
+	.byte      NBit     |Bit3                     ;@ 10
+	.byte CBit|NBit     |Bit3                     ;@ 11
+	.byte           VBit|Bit3                     ;@ 12
+	.byte CBit     |VBit|Bit3                     ;@ 13
+	.byte      NBit|VBit|Bit3                     ;@ 14
+	.byte CBit|NBit|VBit|Bit3                     ;@ 15
+	.byte                     HBit                ;@ 16
+	.byte CBit               |HBit                ;@ 17
+	.byte      NBit          |HBit                ;@ 18
+	.byte CBit|NBit          |HBit                ;@ 19
+	.byte           VBit     |HBit                ;@ 20
+	.byte CBit     |VBit     |HBit                ;@ 21
+	.byte      NBit|VBit     |HBit                ;@ 22
+	.byte CBit|NBit|VBit     |HBit                ;@ 23
+	.byte                Bit3|HBit                ;@ 24
+	.byte CBit          |Bit3|HBit                ;@ 25
+	.byte      NBit     |Bit3|HBit                ;@ 26
+	.byte CBit|NBit     |Bit3|HBit                ;@ 27
+	.byte           VBit|Bit3|HBit                ;@ 28
+	.byte CBit     |VBit|Bit3|HBit                ;@ 29
+	.byte      NBit|VBit|Bit3|HBit                ;@ 30
+	.byte CBit|NBit|VBit|Bit3|HBit                ;@ 31
+	.byte                          Bit5           ;@ 32
+	.byte CBit                    |Bit5           ;@ 33
+	.byte      NBit               |Bit5           ;@ 34
+	.byte CBit|NBit               |Bit5           ;@ 35
+	.byte           VBit          |Bit5           ;@ 36
+	.byte CBit     |VBit          |Bit5           ;@ 37
+	.byte      NBit|VBit          |Bit5           ;@ 38
+	.byte CBit|NBit|VBit          |Bit5           ;@ 39
+	.byte                Bit3     |Bit5           ;@ 40
+	.byte CBit          |Bit3     |Bit5           ;@ 41
+	.byte      NBit     |Bit3     |Bit5           ;@ 42
+	.byte CBit|NBit     |Bit3     |Bit5           ;@ 43
+	.byte           VBit|Bit3     |Bit5           ;@ 44
+	.byte CBit     |VBit|Bit3     |Bit5           ;@ 45
+	.byte      NBit|VBit|Bit3     |Bit5           ;@ 46
+	.byte CBit|NBit|VBit|Bit3     |Bit5           ;@ 47
+	.byte                     HBit|Bit5           ;@ 48
+	.byte CBit               |HBit|Bit5           ;@ 49
+	.byte      NBit          |HBit|Bit5           ;@ 50
+	.byte CBit|NBit          |HBit|Bit5           ;@ 51
+	.byte           VBit     |HBit|Bit5           ;@ 52
+	.byte CBit     |VBit     |HBit|Bit5           ;@ 53
+	.byte      NBit|VBit     |HBit|Bit5           ;@ 54
+	.byte CBit|NBit|VBit     |HBit|Bit5           ;@ 55
+	.byte                Bit3|HBit|Bit5           ;@ 56
+	.byte CBit          |Bit3|HBit|Bit5           ;@ 57
+	.byte      NBit     |Bit3|HBit|Bit5           ;@ 58
+	.byte CBit|NBit     |Bit3|HBit|Bit5           ;@ 59
+	.byte           VBit|Bit3|HBit|Bit5           ;@ 60
+	.byte CBit     |VBit|Bit3|HBit|Bit5           ;@ 61
+	.byte      NBit|VBit|Bit3|HBit|Bit5           ;@ 62
+	.byte CBit|NBit|VBit|Bit3|HBit|Bit5           ;@ 63
+	.byte                               ZBit      ;@ 64
+	.byte CBit                         |ZBit      ;@ 65
+	.byte      NBit                    |ZBit      ;@ 66
+	.byte CBit|NBit                    |ZBit      ;@ 67
+	.byte           VBit               |ZBit      ;@ 68
+	.byte CBit     |VBit               |ZBit      ;@ 69
+	.byte      NBit|VBit               |ZBit      ;@ 70
+	.byte CBit|NBit|VBit               |ZBit      ;@ 71
+	.byte                Bit3          |ZBit      ;@ 72
+	.byte CBit          |Bit3          |ZBit      ;@ 73
+	.byte      NBit     |Bit3          |ZBit      ;@ 74
+	.byte CBit|NBit     |Bit3          |ZBit      ;@ 75
+	.byte           VBit|Bit3          |ZBit      ;@ 76
+	.byte CBit     |VBit|Bit3          |ZBit      ;@ 77
+	.byte      NBit|VBit|Bit3          |ZBit      ;@ 78
+	.byte CBit|NBit|VBit|Bit3          |ZBit      ;@ 79
+	.byte                     HBit     |ZBit      ;@ 80
+	.byte CBit               |HBit     |ZBit      ;@ 81
+	.byte      NBit          |HBit     |ZBit      ;@ 82
+	.byte CBit|NBit          |HBit     |ZBit      ;@ 83
+	.byte           VBit     |HBit     |ZBit      ;@ 84
+	.byte CBit     |VBit     |HBit     |ZBit      ;@ 85
+	.byte      NBit|VBit     |HBit     |ZBit      ;@ 86
+	.byte CBit|NBit|VBit     |HBit     |ZBit      ;@ 87
+	.byte                Bit3|HBit     |ZBit      ;@ 88
+	.byte CBit          |Bit3|HBit     |ZBit      ;@ 89
+	.byte      NBit     |Bit3|HBit     |ZBit      ;@ 90
+	.byte CBit|NBit     |Bit3|HBit     |ZBit      ;@ 91
+	.byte           VBit|Bit3|HBit     |ZBit      ;@ 92
+	.byte CBit     |VBit|Bit3|HBit     |ZBit      ;@ 93
+	.byte      NBit|VBit|Bit3|HBit     |ZBit      ;@ 94
+	.byte CBit|NBit|VBit|Bit3|HBit     |ZBit      ;@ 95
+	.byte                          Bit5|ZBit      ;@ 96
+	.byte CBit                    |Bit5|ZBit      ;@ 97
+	.byte      NBit               |Bit5|ZBit      ;@ 98
+	.byte CBit|NBit               |Bit5|ZBit      ;@ 99
+	.byte           VBit          |Bit5|ZBit      ;@ 100
+	.byte CBit     |VBit          |Bit5|ZBit      ;@ 101
+	.byte      NBit|VBit          |Bit5|ZBit      ;@ 102
+	.byte CBit|NBit|VBit          |Bit5|ZBit      ;@ 103
+	.byte                Bit3     |Bit5|ZBit      ;@ 104
+	.byte CBit          |Bit3     |Bit5|ZBit      ;@ 105
+	.byte      NBit     |Bit3     |Bit5|ZBit      ;@ 106
+	.byte CBit|NBit     |Bit3     |Bit5|ZBit      ;@ 107
+	.byte           VBit|Bit3     |Bit5|ZBit      ;@ 108
+	.byte CBit     |VBit|Bit3     |Bit5|ZBit      ;@ 109
+	.byte      NBit|VBit|Bit3     |Bit5|ZBit      ;@ 110
+	.byte CBit|NBit|VBit|Bit3     |Bit5|ZBit      ;@ 111
+	.byte                     HBit|Bit5|ZBit      ;@ 112
+	.byte CBit               |HBit|Bit5|ZBit      ;@ 113
+	.byte      NBit          |HBit|Bit5|ZBit      ;@ 114
+	.byte CBit|NBit          |HBit|Bit5|ZBit      ;@ 115
+	.byte           VBit     |HBit|Bit5|ZBit      ;@ 116
+	.byte CBit     |VBit     |HBit|Bit5|ZBit      ;@ 117
+	.byte      NBit|VBit     |HBit|Bit5|ZBit      ;@ 118
+	.byte CBit|NBit|VBit     |HBit|Bit5|ZBit      ;@ 119
+	.byte                Bit3|HBit|Bit5|ZBit      ;@ 120
+	.byte CBit          |Bit3|HBit|Bit5|ZBit      ;@ 121
+	.byte      NBit     |Bit3|HBit|Bit5|ZBit      ;@ 122
+	.byte CBit|NBit     |Bit3|HBit|Bit5|ZBit      ;@ 123
+	.byte           VBit|Bit3|HBit|Bit5|ZBit      ;@ 124
+	.byte CBit     |VBit|Bit3|HBit|Bit5|ZBit      ;@ 125
+	.byte      NBit|VBit|Bit3|HBit|Bit5|ZBit      ;@ 126
+	.byte CBit|NBit|VBit|Bit3|HBit|Bit5|ZBit      ;@ 127
+	.byte                                    SBit ;@ 128
+	.byte CBit                              |SBit ;@ 129
+	.byte      NBit                         |SBit ;@ 130
+	.byte CBit|NBit                         |SBit ;@ 131
+	.byte           VBit                    |SBit ;@ 132
+	.byte CBit     |VBit                    |SBit ;@ 133
+	.byte      NBit|VBit                    |SBit ;@ 134
+	.byte CBit|NBit|VBit                    |SBit ;@ 135
+	.byte                Bit3               |SBit ;@ 136
+	.byte CBit          |Bit3               |SBit ;@ 137
+	.byte      NBit     |Bit3               |SBit ;@ 138
+	.byte CBit|NBit     |Bit3               |SBit ;@ 139
+	.byte           VBit|Bit3               |SBit ;@ 140
+	.byte CBit     |VBit|Bit3               |SBit ;@ 141
+	.byte      NBit|VBit|Bit3               |SBit ;@ 142
+	.byte CBit|NBit|VBit|Bit3               |SBit ;@ 143
+	.byte                     HBit          |SBit ;@ 144
+	.byte CBit               |HBit          |SBit ;@ 145
+	.byte      NBit          |HBit          |SBit ;@ 146
+	.byte CBit|NBit          |HBit          |SBit ;@ 147
+	.byte           VBit     |HBit          |SBit ;@ 148
+	.byte CBit     |VBit     |HBit          |SBit ;@ 149
+	.byte      NBit|VBit     |HBit          |SBit ;@ 150
+	.byte CBit|NBit|VBit     |HBit          |SBit ;@ 151
+	.byte                Bit3|HBit          |SBit ;@ 152
+	.byte CBit          |Bit3|HBit          |SBit ;@ 153
+	.byte      NBit     |Bit3|HBit          |SBit ;@ 154
+	.byte CBit|NBit     |Bit3|HBit          |SBit ;@ 155
+	.byte           VBit|Bit3|HBit          |SBit ;@ 156
+	.byte CBit     |VBit|Bit3|HBit          |SBit ;@ 157
+	.byte      NBit|VBit|Bit3|HBit          |SBit ;@ 158
+	.byte CBit|NBit|VBit|Bit3|HBit          |SBit ;@ 159
+	.byte                          Bit5     |SBit ;@ 160
+	.byte CBit                    |Bit5     |SBit ;@ 161
+	.byte      NBit               |Bit5     |SBit ;@ 162
+	.byte CBit|NBit               |Bit5     |SBit ;@ 163
+	.byte           VBit          |Bit5     |SBit ;@ 164
+	.byte CBit     |VBit          |Bit5     |SBit ;@ 165
+	.byte      NBit|VBit          |Bit5     |SBit ;@ 166
+	.byte CBit|NBit|VBit          |Bit5     |SBit ;@ 167
+	.byte                Bit3     |Bit5     |SBit ;@ 168
+	.byte CBit          |Bit3     |Bit5     |SBit ;@ 169
+	.byte      NBit     |Bit3     |Bit5     |SBit ;@ 170
+	.byte CBit|NBit     |Bit3     |Bit5     |SBit ;@ 171
+	.byte           VBit|Bit3     |Bit5     |SBit ;@ 172
+	.byte CBit     |VBit|Bit3     |Bit5     |SBit ;@ 173
+	.byte      NBit|VBit|Bit3     |Bit5     |SBit ;@ 174
+	.byte CBit|NBit|VBit|Bit3     |Bit5     |SBit ;@ 175
+	.byte                     HBit|Bit5     |SBit ;@ 176
+	.byte CBit               |HBit|Bit5     |SBit ;@ 177
+	.byte      NBit          |HBit|Bit5     |SBit ;@ 178
+	.byte CBit|NBit          |HBit|Bit5     |SBit ;@ 179
+	.byte           VBit     |HBit|Bit5     |SBit ;@ 180
+	.byte CBit     |VBit     |HBit|Bit5     |SBit ;@ 181
+	.byte      NBit|VBit     |HBit|Bit5     |SBit ;@ 182
+	.byte CBit|NBit|VBit     |HBit|Bit5     |SBit ;@ 183
+	.byte                Bit3|HBit|Bit5     |SBit ;@ 184
+	.byte CBit          |Bit3|HBit|Bit5     |SBit ;@ 185
+	.byte      NBit     |Bit3|HBit|Bit5     |SBit ;@ 186
+	.byte CBit|NBit     |Bit3|HBit|Bit5     |SBit ;@ 187
+	.byte           VBit|Bit3|HBit|Bit5     |SBit ;@ 188
+	.byte CBit     |VBit|Bit3|HBit|Bit5     |SBit ;@ 189
+	.byte      NBit|VBit|Bit3|HBit|Bit5     |SBit ;@ 190
+	.byte CBit|NBit|VBit|Bit3|HBit|Bit5     |SBit ;@ 191
+	.byte                               ZBit|SBit ;@ 192
+	.byte CBit                         |ZBit|SBit ;@ 193
+	.byte      NBit                    |ZBit|SBit ;@ 194
+	.byte CBit|NBit                    |ZBit|SBit ;@ 195
+	.byte           VBit               |ZBit|SBit ;@ 196
+	.byte CBit     |VBit               |ZBit|SBit ;@ 197
+	.byte      NBit|VBit               |ZBit|SBit ;@ 198
+	.byte CBit|NBit|VBit               |ZBit|SBit ;@ 199
+	.byte                Bit3          |ZBit|SBit ;@ 200
+	.byte CBit          |Bit3          |ZBit|SBit ;@ 201
+	.byte      NBit     |Bit3          |ZBit|SBit ;@ 202
+	.byte CBit|NBit     |Bit3          |ZBit|SBit ;@ 203
+	.byte           VBit|Bit3          |ZBit|SBit ;@ 204
+	.byte CBit     |VBit|Bit3          |ZBit|SBit ;@ 205
+	.byte      NBit|VBit|Bit3          |ZBit|SBit ;@ 206
+	.byte CBit|NBit|VBit|Bit3          |ZBit|SBit ;@ 207
+	.byte                     HBit     |ZBit|SBit ;@ 208
+	.byte CBit               |HBit     |ZBit|SBit ;@ 209
+	.byte      NBit          |HBit     |ZBit|SBit ;@ 210
+	.byte CBit|NBit          |HBit     |ZBit|SBit ;@ 211
+	.byte           VBit     |HBit     |ZBit|SBit ;@ 212
+	.byte CBit     |VBit     |HBit     |ZBit|SBit ;@ 213
+	.byte      NBit|VBit     |HBit     |ZBit|SBit ;@ 214
+	.byte CBit|NBit|VBit     |HBit     |ZBit|SBit ;@ 215
+	.byte                Bit3|HBit     |ZBit|SBit ;@ 216
+	.byte CBit          |Bit3|HBit     |ZBit|SBit ;@ 217
+	.byte      NBit     |Bit3|HBit     |ZBit|SBit ;@ 218
+	.byte CBit|NBit     |Bit3|HBit     |ZBit|SBit ;@ 219
+	.byte           VBit|Bit3|HBit     |ZBit|SBit ;@ 220
+	.byte CBit     |VBit|Bit3|HBit     |ZBit|SBit ;@ 221
+	.byte      NBit|VBit|Bit3|HBit     |ZBit|SBit ;@ 222
+	.byte CBit|NBit|VBit|Bit3|HBit     |ZBit|SBit ;@ 223
+	.byte                          Bit5|ZBit|SBit ;@ 224
+	.byte CBit                    |Bit5|ZBit|SBit ;@ 225
+	.byte      NBit               |Bit5|ZBit|SBit ;@ 226
+	.byte CBit|NBit               |Bit5|ZBit|SBit ;@ 227
+	.byte           VBit          |Bit5|ZBit|SBit ;@ 228
+	.byte CBit     |VBit          |Bit5|ZBit|SBit ;@ 229
+	.byte      NBit|VBit          |Bit5|ZBit|SBit ;@ 230
+	.byte CBit|NBit|VBit          |Bit5|ZBit|SBit ;@ 231
+	.byte                Bit3     |Bit5|ZBit|SBit ;@ 232
+	.byte CBit          |Bit3     |Bit5|ZBit|SBit ;@ 233
+	.byte      NBit     |Bit3     |Bit5|ZBit|SBit ;@ 234
+	.byte CBit|NBit     |Bit3     |Bit5|ZBit|SBit ;@ 235
+	.byte           VBit|Bit3     |Bit5|ZBit|SBit ;@ 236
+	.byte CBit     |VBit|Bit3     |Bit5|ZBit|SBit ;@ 237
+	.byte      NBit|VBit|Bit3     |Bit5|ZBit|SBit ;@ 238
+	.byte CBit|NBit|VBit|Bit3     |Bit5|ZBit|SBit ;@ 239
+	.byte                     HBit|Bit5|ZBit|SBit ;@ 240
+	.byte CBit               |HBit|Bit5|ZBit|SBit ;@ 241
+	.byte      NBit          |HBit|Bit5|ZBit|SBit ;@ 242
+	.byte CBit|NBit          |HBit|Bit5|ZBit|SBit ;@ 243
+	.byte           VBit     |HBit|Bit5|ZBit|SBit ;@ 244
+	.byte CBit     |VBit     |HBit|Bit5|ZBit|SBit ;@ 245
+	.byte      NBit|VBit     |HBit|Bit5|ZBit|SBit ;@ 246
+	.byte CBit|NBit|VBit     |HBit|Bit5|ZBit|SBit ;@ 247
+	.byte                Bit3|HBit|Bit5|ZBit|SBit ;@ 248
+	.byte CBit          |Bit3|HBit|Bit5|ZBit|SBit ;@ 249
+	.byte      NBit     |Bit3|HBit|Bit5|ZBit|SBit ;@ 250
+	.byte CBit|NBit     |Bit3|HBit|Bit5|ZBit|SBit ;@ 251
+	.byte           VBit|Bit3|HBit|Bit5|ZBit|SBit ;@ 252
+	.byte CBit     |VBit|Bit3|HBit|Bit5|ZBit|SBit ;@ 253
+	.byte      NBit|VBit|Bit3|HBit|Bit5|ZBit|SBit ;@ 254
+	.byte CBit|NBit|VBit|Bit3|HBit|Bit5|ZBit|SBit ;@ 255
+
+.align 4
+
+ZSTable_data:
+	.byte ZBit          ,              0,              0,              0
+	.byte              0,              0,              0,              0
+	.byte           Bit3,           Bit3,           Bit3,           Bit3
+	.byte           Bit3,           Bit3,           Bit3,           Bit3
+	.byte              0,              0,              0,              0
+	.byte              0,              0,              0,              0
+	.byte           Bit3,           Bit3,           Bit3,           Bit3
+	.byte           Bit3,           Bit3,           Bit3,           Bit3
+	.byte      Bit5     ,      Bit5     ,      Bit5     ,      Bit5
+	.byte      Bit5     ,      Bit5     ,      Bit5     ,      Bit5
+	.byte      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3
+	.byte      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3
+	.byte      Bit5     ,      Bit5     ,      Bit5     ,      Bit5
+	.byte      Bit5     ,      Bit5     ,      Bit5     ,      Bit5
+	.byte      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3
+	.byte      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3
+	.byte              0,              0,              0,              0
+	.byte              0,              0,              0,              0
+	.byte           Bit3,           Bit3,           Bit3,           Bit3
+	.byte           Bit3,           Bit3,           Bit3,           Bit3
+	.byte              0,              0,              0,              0
+	.byte              0,              0,              0,              0
+	.byte           Bit3,           Bit3,           Bit3,           Bit3
+	.byte           Bit3,           Bit3,           Bit3,           Bit3
+	.byte      Bit5     ,      Bit5     ,      Bit5     ,      Bit5
+	.byte      Bit5     ,      Bit5     ,      Bit5     ,      Bit5
+	.byte      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3
+	.byte      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3
+	.byte      Bit5     ,      Bit5     ,      Bit5     ,      Bit5
+	.byte      Bit5     ,      Bit5     ,      Bit5     ,      Bit5
+	.byte      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3
+	.byte      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3,      Bit5|Bit3
+	.byte SBit          , SBit          , SBit          , SBit
+	.byte SBit          , SBit          , SBit          , SBit
+	.byte SBit     |Bit3, SBit     |Bit3, SBit     |Bit3, SBit     |Bit3
+	.byte SBit     |Bit3, SBit     |Bit3, SBit     |Bit3, SBit     |Bit3
+	.byte SBit          , SBit          , SBit          , SBit
+	.byte SBit          , SBit          , SBit          , SBit
+	.byte SBit     |Bit3, SBit     |Bit3, SBit     |Bit3, SBit     |Bit3
+	.byte SBit     |Bit3, SBit     |Bit3, SBit     |Bit3, SBit     |Bit3
+	.byte SBit|Bit5     , SBit|Bit5     , SBit|Bit5     , SBit|Bit5
+	.byte SBit|Bit5     , SBit|Bit5     , SBit|Bit5     , SBit|Bit5
+	.byte SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3
+	.byte SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3
+	.byte SBit|Bit5     , SBit|Bit5     , SBit|Bit5     , SBit|Bit5
+	.byte SBit|Bit5     , SBit|Bit5     , SBit|Bit5     , SBit|Bit5
+	.byte SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3
+	.byte SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3
+	.byte SBit          , SBit          , SBit          , SBit
+	.byte SBit          , SBit          , SBit          , SBit
+	.byte SBit     |Bit3, SBit     |Bit3, SBit     |Bit3, SBit     |Bit3
+	.byte SBit     |Bit3, SBit     |Bit3, SBit     |Bit3, SBit     |Bit3
+	.byte SBit          , SBit          , SBit          , SBit
+	.byte SBit          , SBit          , SBit          , SBit
+	.byte SBit     |Bit3, SBit     |Bit3, SBit     |Bit3, SBit     |Bit3
+	.byte SBit     |Bit3, SBit     |Bit3, SBit     |Bit3, SBit     |Bit3
+	.byte SBit|Bit5     , SBit|Bit5     , SBit|Bit5     , SBit|Bit5
+	.byte SBit|Bit5     , SBit|Bit5     , SBit|Bit5     , SBit|Bit5
+	.byte SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3
+	.byte SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3
+	.byte SBit|Bit5     , SBit|Bit5     , SBit|Bit5     , SBit|Bit5
+	.byte SBit|Bit5     , SBit|Bit5     , SBit|Bit5     , SBit|Bit5
+	.byte SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3
+	.byte SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3, SBit|Bit5|Bit3
+
+.align 4
+
+PZSTable_data:
+	.byte ZBit|VBit          ,                   0,                   0,      VBit
+	.byte                   0,      VBit          ,      VBit          ,                   0
+	.byte                Bit3,      VBit     |Bit3,      VBit     |Bit3,                Bit3
+	.byte      VBit     |Bit3,                Bit3,                Bit3,      VBit     |Bit3
+	.byte                   0,      VBit          ,      VBit          ,                   0
+	.byte      VBit          ,                   0,                   0,      VBit
+	.byte      VBit     |Bit3,                Bit3,                Bit3,      VBit     |Bit3
+	.byte                Bit3,      VBit     |Bit3,      VBit     |Bit3,                Bit3
+	.byte           Bit5     ,      VBit|Bit5     ,      VBit|Bit5     ,           Bit5
+	.byte      VBit|Bit5     ,           Bit5     ,           Bit5     ,      VBit|Bit5
+	.byte      VBit|Bit5|Bit3,           Bit5|Bit3,           Bit5|Bit3,      VBit|Bit5|Bit3
+	.byte           Bit5|Bit3,      VBit|Bit5|Bit3,      VBit|Bit5|Bit3,           Bit5|Bit3
+	.byte      VBit|Bit5     ,           Bit5     ,           Bit5     ,      VBit|Bit5
+	.byte           Bit5     ,      VBit|Bit5     ,      VBit|Bit5     ,           Bit5
+	.byte           Bit5|Bit3,      VBit|Bit5|Bit3,      VBit|Bit5|Bit3,           Bit5|Bit3
+	.byte      VBit|Bit5|Bit3,           Bit5|Bit3,           Bit5|Bit3,      VBit|Bit5|Bit3
+	.byte                   0,      VBit          ,      VBit          ,                   0
+	.byte      VBit          ,                   0,                   0,      VBit
+	.byte      VBit     |Bit3,                Bit3,                Bit3,      VBit     |Bit3
+	.byte                Bit3,      VBit     |Bit3,      VBit     |Bit3,                Bit3
+	.byte      VBit          ,                   0,                   0,      VBit
+	.byte                   0,      VBit          ,      VBit          ,                   0
+	.byte                Bit3,      VBit     |Bit3,      VBit     |Bit3,                Bit3
+	.byte      VBit     |Bit3,                Bit3,                Bit3,      VBit     |Bit3
+	.byte      VBit|Bit5     ,           Bit5     ,           Bit5     ,      VBit|Bit5
+	.byte           Bit5     ,      VBit|Bit5     ,      VBit|Bit5     ,           Bit5
+	.byte           Bit5|Bit3,      VBit|Bit5|Bit3,      VBit|Bit5|Bit3,           Bit5|Bit3
+	.byte      VBit|Bit5|Bit3,           Bit5|Bit3,           Bit5|Bit3,      VBit|Bit5|Bit3
+	.byte           Bit5     ,      VBit|Bit5     ,      VBit|Bit5     ,           Bit5
+	.byte      VBit|Bit5     ,           Bit5     ,           Bit5     ,      VBit|Bit5
+	.byte      VBit|Bit5|Bit3,           Bit5|Bit3,           Bit5|Bit3,      VBit|Bit5|Bit3
+	.byte           Bit5|Bit3,      VBit|Bit5|Bit3,      VBit|Bit5|Bit3,           Bit5|Bit3
+	.byte SBit               , SBit|VBit          , SBit|VBit          , SBit
+	.byte SBit|VBit          , SBit               , SBit               , SBit|VBit
+	.byte SBit|VBit     |Bit3, SBit          |Bit3, SBit          |Bit3, SBit|VBit     |Bit3
+	.byte SBit          |Bit3, SBit|VBit     |Bit3, SBit|VBit     |Bit3, SBit          |Bit3
+	.byte SBit|VBit          , SBit               , SBit               , SBit|VBit
+	.byte SBit               , SBit|VBit          , SBit|VBit          , SBit
+	.byte SBit          |Bit3, SBit|VBit     |Bit3, SBit|VBit     |Bit3, SBit          |Bit3
+	.byte SBit|VBit     |Bit3, SBit          |Bit3, SBit          |Bit3, SBit|VBit     |Bit3
+	.byte SBit|VBit|Bit5     , SBit     |Bit5     , SBit     |Bit5     , SBit|VBit|Bit5
+	.byte SBit     |Bit5     , SBit|VBit|Bit5     , SBit|VBit|Bit5     , SBit     |Bit5
+	.byte SBit     |Bit5|Bit3, SBit|VBit|Bit5|Bit3, SBit|VBit|Bit5|Bit3, SBit     |Bit5|Bit3
+	.byte SBit|VBit|Bit5|Bit3, SBit     |Bit5|Bit3, SBit     |Bit5|Bit3, SBit|VBit|Bit5|Bit3
+	.byte SBit     |Bit5     , SBit|VBit|Bit5     , SBit|VBit|Bit5     , SBit     |Bit5
+	.byte SBit|VBit|Bit5     , SBit     |Bit5     , SBit     |Bit5     , SBit|VBit|Bit5
+	.byte SBit|VBit|Bit5|Bit3, SBit     |Bit5|Bit3, SBit     |Bit5|Bit3, SBit|VBit|Bit5|Bit3
+	.byte SBit     |Bit5|Bit3, SBit|VBit|Bit5|Bit3, SBit|VBit|Bit5|Bit3, SBit     |Bit5|Bit3
+	.byte SBit|VBit          , SBit               , SBit               , SBit|VBit
+	.byte SBit               , SBit|VBit          , SBit|VBit          , SBit
+	.byte SBit          |Bit3, SBit|VBit     |Bit3, SBit|VBit     |Bit3, SBit          |Bit3
+	.byte SBit|VBit     |Bit3, SBit          |Bit3, SBit          |Bit3, SBit|VBit     |Bit3
+	.byte SBit               , SBit|VBit          , SBit|VBit          , SBit
+	.byte SBit|VBit          , SBit               , SBit               , SBit|VBit
+	.byte SBit|VBit     |Bit3, SBit          |Bit3, SBit          |Bit3, SBit|VBit     |Bit3
+	.byte SBit          |Bit3, SBit|VBit     |Bit3, SBit|VBit     |Bit3, SBit          |Bit3
+	.byte SBit     |Bit5     , SBit|VBit|Bit5     , SBit|VBit|Bit5     , SBit     |Bit5
+	.byte SBit|VBit|Bit5     , SBit     |Bit5     , SBit     |Bit5     , SBit|VBit|Bit5
+	.byte SBit|VBit|Bit5|Bit3, SBit     |Bit5|Bit3, SBit     |Bit5|Bit3, SBit|VBit|Bit5|Bit3
+	.byte SBit     |Bit5|Bit3, SBit|VBit|Bit5|Bit3, SBit|VBit|Bit5|Bit3, SBit     |Bit5|Bit3
+	.byte SBit|VBit|Bit5     , SBit     |Bit5     , SBit     |Bit5     , SBit|VBit|Bit5
+	.byte SBit     |Bit5     , SBit|VBit|Bit5     , SBit|VBit|Bit5     , SBit     |Bit5
+	.byte SBit     |Bit5|Bit3, SBit|VBit|Bit5|Bit3, SBit|VBit|Bit5|Bit3, SBit     |Bit5|Bit3
+	.byte SBit|VBit|Bit5|Bit3, SBit     |Bit5|Bit3, SBit     |Bit5|Bit3, SBit|VBit|Bit5|Bit3
 
 .align 4
 
@@ -4289,10 +4450,11 @@ opcode_0_6:
 	fetch 7
 ;@RLCA
 opcode_0_7:
-	bic z80f,z80f,#(1<<NFlag)|(1<<HFlag)|(1<<CFlag)
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<VFlag)
 	movs z80a,z80a, lsl #1
 	orrcs z80a,z80a,#1<<24
 	orrcs z80f,z80f,#1<<CFlag
+	copyFlag35 z80a
 	fetch 4
 ;@EX AF,AF'
 opcode_0_8:
@@ -4333,11 +4495,12 @@ opcode_0_E:
 	fetch 7
 ;@RRCA
 opcode_0_F:
-	bic z80f,z80f,#(1<<NFlag)|(1<<HFlag)|(1<<CFlag)
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<VFlag)
 	movs z80a,z80a, lsr #25
 	orrcs z80a,z80a,#1<<7
 	orrcs z80f,z80f,#1<<CFlag
 	mov z80a,z80a, lsl #24
+	copyFlag35 z80a
 	fetch 4
 ;@DJNZ $+2
 opcode_1_0:
@@ -4382,9 +4545,10 @@ opcode_1_6:
 opcode_1_7:
 	tst z80f,#1<<CFlag
 	orrne z80a,z80a,#1<<23
-	bic z80f,z80f,#(1<<NFlag)|(1<<HFlag)|(1<<CFlag)
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<VFlag)
 	movs z80a,z80a, lsl #1
 	orrcs z80f,z80f,#1<<CFlag
+	copyFlag35 z80a
 	fetch 4
 ;@JR $+2
 opcode_1_8:
@@ -4422,10 +4586,11 @@ opcode_1_E:
 ;@RRA
 opcode_1_F:
 	orr z80a,z80a,z80f,lsr#1		;@get C
-	bic z80f,z80f,#(1<<NFlag)|(1<<HFlag)|(1<<CFlag)
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<VFlag)
 	movs z80a,z80a,ror#25
 	orrcs z80f,z80f,#1<<CFlag
 	mov z80a,z80a,lsl#24
+	copyFlag35 z80a
 	fetch 4
 ;@JR NZ,$+2
 opcode_2_0:
@@ -4478,7 +4643,8 @@ opcode_2_7:
 	orrne r1,r1,#512
 	tst z80f,#1<<NFlag
 	orrne r1,r1,#1024
-	PIC_LDR(r2, r0, DAATable)
+	sub r2,opcodes,#OFFS_DAA
+;@	PIC_LDR(r2, r0, DAATable)
 	add r2,r2,r1, lsl #1
 	ldrh r1,[r2]
 	and z80f,r1,#0xFF
@@ -4528,7 +4694,9 @@ opcode_2_E:
 ;@CPL
 opcode_2_F:
 	eor z80a,z80a,#0xFF<<24
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<VFlag)|(1<<CFlag)
 	orr z80f,z80f,#(1<<NFlag)|(1<<HFlag)
+	copyFlag35 z80a
 	fetch 4
 ;@JR NC,$+2
 opcode_3_0:
@@ -4579,8 +4747,9 @@ opcode_3_6:
 	fetch 10
 ;@SCF
 opcode_3_7:
-	bic z80f,z80f,#(1<<NFlag)|(1<<HFlag)
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<VFlag)|(1<<CFlag)
 	orr z80f,z80f,#1<<CFlag
+	copyFlag35 z80a
 	fetch 4
 ;@JR C,$+2
 opcode_3_8:
@@ -4625,10 +4794,11 @@ opcode_3_E:
 	fetch 7
 ;@CCF
 opcode_3_F:
-	bic z80f,z80f,#(1<<NFlag)|(1<<HFlag)
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<VFlag)|(1<<CFlag)
 	tst z80f,#1<<CFlag
 	orrne z80f,z80f,#1<<HFlag
 	eor z80f,z80f,#1<<CFlag
+	copyFlag35 z80a
 	fetch 4
 
 ;@LD B,C
@@ -5562,7 +5732,7 @@ opcode_F_0:
 opcode_F_1:
 .if FAST_Z80SP
 	ldrb z80f,[z80sp],#1
-	sub r0,opcodes,#0x200
+	sub r0,opcodes,#OFFS_ZF
 	ldrb z80f,[r0,z80f]
 	ldrb z80a,[z80sp],#1
 	mov z80a,z80a, lsl #24
@@ -5573,7 +5743,7 @@ opcode_F_1:
 	and z80a,r0,#0xFF00
 	mov z80a,z80a,lsl#16
 	and z80f,r0,#0xFF
-	sub r0,opcodes,#0x200
+	sub r0,opcodes,#OFFS_ZF
 	ldrb z80f,[r0,z80f]
 .endif
 	fetch 10
@@ -5597,7 +5767,7 @@ opcode_F_4:
 	fetch 10
 ;@PUSH AF
 opcode_F_5:
-	sub r0,opcodes,#0x300
+	sub r0,opcodes,#OFFS_AF
 	ldrb r0,[r0,z80f]
 	orr r2,r0,z80a,lsr#16
     opPUSHareg r2
@@ -5932,6 +6102,7 @@ opcode_CB_45:
 	opBITL z80hl 0
 ;@BIT 0,(HL)
 opcode_CB_46:
+	orr z80f,z80f,#0xc000<<16		;@ hack for ZEXALL
 	readmem8HL
 	opBITb 0
 	fetch 12
@@ -5959,6 +6130,7 @@ opcode_CB_4D:
 	opBITL z80hl 1
 ;@BIT 1,(HL)
 opcode_CB_4E:
+	orr z80f,z80f,#0xc000<<16		;@ hack for ZEXALL
 	readmem8HL
 	opBITb 1
 	fetch 12
@@ -5986,6 +6158,7 @@ opcode_CB_55:
 	opBITL z80hl 2
 ;@BIT 2,(HL)
 opcode_CB_56:
+	orr z80f,z80f,#0xc000<<16		;@ hack for ZEXALL
 	readmem8HL
 	opBITb 2
 	fetch 12
@@ -6013,6 +6186,7 @@ opcode_CB_5D:
 	opBITL z80hl 3
 ;@BIT 3,(HL)
 opcode_CB_5E:
+	orr z80f,z80f,#0xc000<<16		;@ hack for ZEXALL
 	readmem8HL
 	opBITb 3
 	fetch 12
@@ -6040,6 +6214,7 @@ opcode_CB_65:
 	opBITL z80hl 4
 ;@BIT 4,(HL)
 opcode_CB_66:
+	orr z80f,z80f,#0xc000<<16		;@ hack for ZEXALL
 	readmem8HL
 	opBITb 4
 	fetch 12
@@ -6067,6 +6242,7 @@ opcode_CB_6D:
 	opBITL z80hl 5
 ;@BIT 5,(HL)
 opcode_CB_6E:
+	orr z80f,z80f,#0xc000<<16		;@ hack for ZEXALL
 	readmem8HL
 	opBITb 5
 	fetch 12
@@ -6094,6 +6270,7 @@ opcode_CB_75:
 	opBITL z80hl 6
 ;@BIT 6,(HL)
 opcode_CB_76:
+	orr z80f,z80f,#0xc000<<16		;@ hack for ZEXALL
 	readmem8HL
 	opBITb 6
 	fetch 12
@@ -6121,6 +6298,7 @@ opcode_CB_7D:
 	opBIT7L z80hl
 ;@BIT 7,(HL)
 opcode_CB_7E:
+	orr z80f,z80f,#0xc000<<16		;@ hack for ZEXALL
 	readmem8HL
 	opBIT7b
 	fetch 12
@@ -6734,9 +6912,9 @@ opcode_DD_2A:
 	ldrb r0,[z80pc],#1
 	ldrb r1,[z80pc],#1
 	orr r0,r0,r1, lsl #8
-	stmfd sp!,{z80xx}
+	stmfd sp!,{r2,z80xx}
 	readmem16
-	ldmfd sp!,{z80xx}
+	ldmfd sp!,{r2,z80xx}
 	strh r0,[z80xx,#2]
 	fetch 20
 ;@DEC IX
@@ -6768,10 +6946,10 @@ opcode_DD_34:
 	ldr r1,[z80xx]
 	add r0,r1,r0, lsl #16
 	mov r0,r0,lsr #16
-	stmfd sp!,{r0}	;@ save addr
+	stmfd sp!,{r0,r2}	;@ save addr
 	readmem8
 	opINC8b
-	ldmfd sp!,{r1}	;@ restore addr into r1
+	ldmfd sp!,{r1,r2}	;@ restore addr into r1
 	writemem8
 	fetch 23
 ;@DEC (IX+N)
@@ -6780,10 +6958,10 @@ opcode_DD_35:
 	ldr r1,[z80xx]
 	add r0,r1,r0, lsl #16
 	mov r0,r0,lsr #16
-	stmfd sp!,{r0}	;@ save addr
+	stmfd sp!,{r0,r2}	;@ save addr
 	readmem8
 	opDEC8b
-	ldmfd sp!,{r1}	;@ restore addr into r1
+	ldmfd sp!,{r1,r2}	;@ restore addr into r1
 	writemem8
 	fetch 23
 ;@LD (IX+N),N
@@ -7278,107 +7456,115 @@ opcodes_DD_CB:
 
 ;@RLC (IX+N) 
 opcode_DD_CB_06:
-	stmfd sp!,{r0}		;@ save addr
+	stmfd sp!,{r0,r2}		;@ save addr
 	readmem8
 	opRLCb
-	ldmfd sp!,{r1}		;@ restore addr into r1
+	ldmfd sp!,{r1,r2}		;@ restore addr into r1
 	writemem8
 	fetch 23
 ;@RRC (IX+N) 
 opcode_DD_CB_0E:
-	stmfd sp!,{r0}		;@ save addr
+	stmfd sp!,{r0,r2}		;@ save addr
 	readmem8
 	opRRCb
-	ldmfd sp!,{r1}		;@ restore addr into r1
+	ldmfd sp!,{r1,r2}		;@ restore addr into r1
 	writemem8
 	fetch 23
 ;@RL (IX+N) 
 opcode_DD_CB_16:
-	stmfd sp!,{r0}		;@ save addr
+	stmfd sp!,{r0,r2}		;@ save addr
 	readmem8
 	opRLb
-	ldmfd sp!,{r1}		;@ restore addr into r1
+	ldmfd sp!,{r1,r2}		;@ restore addr into r1
 	writemem8
 	fetch 23
 ;@RR (IX+N) 
 opcode_DD_CB_1E:
-	stmfd sp!,{r0}		;@ save addr 
+	stmfd sp!,{r0,r2}		;@ save addr 
 	readmem8
 	opRRb
-	ldmfd sp!,{r1}		;@ restore addr into r1
+	ldmfd sp!,{r1,r2}		;@ restore addr into r1
 	writemem8
 	fetch 23
 
 ;@SLA (IX+N) 
 opcode_DD_CB_26:
-	stmfd sp!,{r0}		;@ save addr 
+	stmfd sp!,{r0,r2}		;@ save addr 
 	readmem8
 	opSLAb
-	ldmfd sp!,{r1}		;@ restore addr into r1
+	ldmfd sp!,{r1,r2}		;@ restore addr into r1
 	writemem8
 	fetch 23
 ;@SRA (IX+N) 
 opcode_DD_CB_2E:
-	stmfd sp!,{r0}		;@ save addr 
+	stmfd sp!,{r0,r2}		;@ save addr 
 	readmem8
 	opSRAb
-	ldmfd sp!,{r1}		;@ restore addr into r1
+	ldmfd sp!,{r1,r2}		;@ restore addr into r1
 	writemem8
 	fetch 23
 ;@SLL (IX+N) 
 opcode_DD_CB_36:
-	stmfd sp!,{r0}		;@ save addr 
+	stmfd sp!,{r0,r2}		;@ save addr 
 	readmem8
 	opSLLb
-	ldmfd sp!,{r1}		;@ restore addr into r1
+	ldmfd sp!,{r1,r2}		;@ restore addr into r1
 	writemem8
 	fetch 23
 ;@SRL (IX+N)
 opcode_DD_CB_3E:
-	stmfd sp!,{r0}		;@ save addr 
+	stmfd sp!,{r0,r2}		;@ save addr 
 	readmem8
 	opSRLb
-	ldmfd sp!,{r1}		;@ restore addr into r1
+	ldmfd sp!,{r1,r2}		;@ restore addr into r1
 	writemem8
 	fetch 23
 
 ;@BIT 0,(IX+N) 
 opcode_DD_CB_46:
+	orr z80f,z80f,r0,lsl#16
 	readmem8
 	opBITb 0
 	fetch 20
 ;@BIT 1,(IX+N) 
 opcode_DD_CB_4E:
+	orr z80f,z80f,r0,lsl#16
 	readmem8
 	opBITb 1
 	fetch 20
 ;@BIT 2,(IX+N) 
 opcode_DD_CB_56:
+	orr z80f,z80f,r0,lsl#16
 	readmem8
 	opBITb 2
 	fetch 20
 ;@BIT 3,(IX+N) 
 opcode_DD_CB_5E:
+	orr z80f,z80f,r0,lsl#16
 	readmem8
 	opBITb 3
 	fetch 20
 ;@BIT 4,(IX+N) 
 opcode_DD_CB_66:
+	orr z80f,z80f,r0,lsl#16
 	readmem8
 	opBITb 4
 	fetch 20
 ;@BIT 5,(IX+N) 
 opcode_DD_CB_6E:
+	orr z80f,z80f,r0,lsl#16
 	readmem8
 	opBITb 5
 	fetch 20
 ;@BIT 6,(IX+N) 
 opcode_DD_CB_76:
+	orr z80f,z80f,r0,lsl#16
 	readmem8
 	opBITb 6
 	fetch 20
 ;@BIT 7,(IX+N) 
 opcode_DD_CB_7E:
+	orr z80f,z80f,r0,lsl#16
 	readmem8
 	opBIT7b
 	fetch 20
@@ -7440,9 +7626,9 @@ opcode_DD_E1:
 	opPOP
 .else
 	mov r0,z80sp
-	stmfd sp!,{z80xx}
+	stmfd sp!,{r2,z80xx}
 	readmem16
-	ldmfd sp!,{z80xx}
+	ldmfd sp!,{r2,z80xx}
 	add z80sp,z80sp,#2
 .endif
 	strh r0,[z80xx,#2]
@@ -7460,9 +7646,9 @@ opcode_DD_E3:
 	strh r2,[z80xx,#2]
 .else
 	mov r0,z80sp
-	stmfd sp!,{z80xx}
+	stmfd sp!,{r2,z80xx}
 	readmem16
-	ldmfd sp!,{z80xx}
+	ldmfd sp!,{r2,z80xx}
 	mov r2,r0
 	ldrh r0,[z80xx,#2]
 	strh r2,[z80xx,#2]
@@ -7509,7 +7695,7 @@ opcode_ED_40:
 	opIN_C
 	and z80bc,z80bc,#0xFF<<16
 	orr z80bc,z80bc,r0, lsl #24
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb r0,[r1,r0]
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,r0
@@ -7540,6 +7726,7 @@ opcode_ED_44:
 	eor z80f,z80f,#(1<<CFlag)|(1<<NFlag)	;@invert C and set n.
 	tst z80a,#0x0F000000					;@H, correct
 	orrne z80f,z80f,#1<<HFlag
+	copyFlag35 z80a
 	fetch 8
  
 ;@RETN, moved to ED_4D
@@ -7558,7 +7745,7 @@ opcode_ED_48:
 	opIN_C
 	and z80bc,z80bc,#0xFF<<24
 	orr z80bc,z80bc,r0, lsl #16
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb r0,[r1,r0]
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,r0
@@ -7605,7 +7792,7 @@ opcode_ED_50:
 	opIN_C
 	and z80de,z80de,#0xFF<<16
 	orr z80de,z80de,r0, lsl #24
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb r0,[r1,r0]
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,r0
@@ -7647,7 +7834,7 @@ opcode_ED_58:
 	opIN_C
 	and z80de,z80de,#0xFF<<24
 	orr z80de,z80de,r0, lsl #16
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb r0,[r1,r0]
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,r0
@@ -7694,7 +7881,7 @@ opcode_ED_60:
 	opIN_C
 	and z80hl,z80hl,#0xFF<<16
 	orr z80hl,z80hl,r0, lsl #24
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb r0,[r1,r0]
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,r0
@@ -7715,7 +7902,7 @@ opcode_ED_67:
 	bic z80a,z80a,#0x0F000000
 	orr z80a,z80a,r1,lsr#4
 	writemem8HL
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb r0,[r1,z80a, lsr #24]
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,r0
@@ -7726,7 +7913,7 @@ opcode_ED_68:
 	and z80hl,z80hl,#0xFF<<24
 	orr z80hl,z80hl,r0, lsl #16
 	and z80f,z80f,#1<<CFlag
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb r0,[r1,r0]
 	orr z80f,z80f,r0
 	fetch 12
@@ -7748,7 +7935,7 @@ opcode_ED_6F:
 	orr z80a,z80a,r0,lsl#16
 	and z80a,z80a,#0xFF000000
 	writemem8HL
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb r0,[r1,z80a, lsr #24]
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,r0
@@ -7757,7 +7944,7 @@ opcode_ED_6F:
 opcode_ED_70:
 	opIN_C
 	and z80f,z80f,#1<<CFlag
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb r0,[r1,r0]
 	orr z80f,z80f,r0
 	fetch 12
@@ -7795,7 +7982,7 @@ opcode_ED_78:
 	opIN_C
 	mov z80a,r0, lsl #24
 	and z80f,z80f,#1<<CFlag
-	sub r1,opcodes,#0x100
+	sub r1,opcodes,#OFFS_PZS
 	ldrb r0,[r1,r0]
 	orr z80f,z80f,r0
 	fetch 12
@@ -7831,22 +8018,32 @@ opcode_ED_A0:
 	copymem8HL_DE
 	add z80hl,z80hl,#1<<16
 	add z80de,z80de,#1<<16
+	add r0,z80f,z80a			;@ value read stored in z80f
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<CFlag)
 	subs z80bc,z80bc,#1<<16
-	bic z80f,z80f,#(1<<VFlag)|(1<<NFlag)|(1<<HFlag)
 	orrne z80f,z80f,#1<<VFlag
+	tst r0,#0x8<<24
+	orrne z80f,z80f,#(1<<Flag3)
+	tst r0,#0x2<<24
+	orrne z80f,z80f,#(1<<Flag5)
 	fetch 16
 ;@CPI
 opcode_ED_A1:
 	readmem8HL
 	add z80hl,z80hl,#0x00010000
 	mov r1,z80a,lsl#4
-	cmp z80a,r0,lsl#24
+	subs r2,z80a,r0,lsl#24
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,#1<<NFlag
 	orrmi z80f,z80f,#1<<SFlag
 	orreq z80f,z80f,#1<<ZFlag
 	cmp r1,r0,lsl#28
 	orrcc z80f,z80f,#1<<HFlag
+	subcc r2,r2,#1
+	tst r2,#0x8<<24
+	orrne z80f,z80f,#1<<Flag3
+	tst r2,#0x2<<24
+	orrne z80f,z80f,#1<<Flag5
 	subs z80bc,z80bc,#0x00010000
 	orrne z80f,z80f,#1<<VFlag
 	fetch 16
@@ -7889,9 +8086,14 @@ opcode_ED_A8:
 	copymem8HL_DE
 	sub z80hl,z80hl,#1<<16
 	sub z80de,z80de,#1<<16
+	add r0,z80f,z80a			;@ value read stored in z80f
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<CFlag)
 	subs z80bc,z80bc,#1<<16
-	bic z80f,z80f,#(1<<VFlag)|(1<<NFlag)|(1<<HFlag)
 	orrne z80f,z80f,#1<<VFlag
+	tst r0,#0x8<<24
+	orrne z80f,z80f,#(1<<Flag3)
+	tst r0,#0x2<<24
+	orrne z80f,z80f,#(1<<Flag5)
 	fetch 16
 
 ;@CPD
@@ -7899,13 +8101,18 @@ opcode_ED_A9:
 	readmem8HL
 	sub z80hl,z80hl,#1<<16
 	mov r1,z80a,lsl#4
-	cmp z80a,r0,lsl#24
+	subs r2,z80a,r0,lsl#24
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,#1<<NFlag
 	orrmi z80f,z80f,#1<<SFlag
 	orreq z80f,z80f,#1<<ZFlag
 	cmp r1,r0,lsl#28
 	orrcc z80f,z80f,#1<<HFlag
+	subcc r2,r2,#1
+	tst r2,#0x8<<24
+	orrne z80f,z80f,#1<<Flag3
+	tst r2,#0x2<<24
+	orrne z80f,z80f,#1<<Flag5
 	subs z80bc,z80bc,#0x00010000
 	orrne z80f,z80f,#1<<VFlag
 	fetch 16
@@ -7948,11 +8155,16 @@ opcode_ED_B0:
 	copymem8HL_DE
 	add z80hl,z80hl,#1<<16
 	add z80de,z80de,#1<<16
+	add r0,z80f,z80a			;@ value read stored in z80f
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<CFlag)
 	subs z80bc,z80bc,#1<<16
-	bic z80f,z80f,#(1<<VFlag)|(1<<NFlag)|(1<<HFlag)
 	orrne z80f,z80f,#1<<VFlag
 	subne z80pc,z80pc,#2
 	subne z80_icount,z80_icount,#5
+	tst r0,#0x8<<24
+	orrne z80f,z80f,#(1<<Flag3)
+	tst r0,#0x2<<24
+	orrne z80f,z80f,#(1<<Flag5)
 	fetch 16
 
 ;@CPIR
@@ -7960,13 +8172,18 @@ opcode_ED_B1:
 	readmem8HL
 	add z80hl,z80hl,#1<<16    
 	mov r1,z80a,lsl#4
-	cmp z80a,r0,lsl#24
+	subs r2,z80a,r0,lsl#24
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,#1<<NFlag
 	orrmi z80f,z80f,#1<<SFlag
 	orreq z80f,z80f,#1<<ZFlag
 	cmp r1,r0,lsl#28
 	orrcc z80f,z80f,#1<<HFlag
+	subcc r2,r2,#1
+	tst r2,#0x8<<24
+	orrne z80f,z80f,#1<<Flag3
+	tst r2,#0x2<<24
+	orrne z80f,z80f,#1<<Flag5
 	subs z80bc,z80bc,#1<<16
 	bne opcode_ED_B1_decpc
 	fetch 16
@@ -8017,11 +8234,16 @@ opcode_ED_B8:
 	copymem8HL_DE
 	sub z80hl,z80hl,#1<<16
 	sub z80de,z80de,#1<<16
+	add r0,z80f,z80a			;@ value read stored in z80f
+	and z80f,z80f,#(1<<SFlag)|(1<<ZFlag)|(1<<CFlag)
 	subs z80bc,z80bc,#1<<16
-	bic z80f,z80f,#(1<<VFlag)|(1<<NFlag)|(1<<HFlag)
 	orrne z80f,z80f,#1<<VFlag
 	subne z80pc,z80pc,#2
 	subne z80_icount,z80_icount,#5
+	tst r0,#0x8<<24
+	orrne z80f,z80f,#(1<<Flag3)
+	tst r0,#0x2<<24
+	orrne z80f,z80f,#(1<<Flag5)
 	fetch 16
 
 ;@CPDR
@@ -8029,13 +8251,18 @@ opcode_ED_B9:
 	readmem8HL
 	sub z80hl,z80hl,#1<<16
 	mov r1,z80a,lsl#4
-	cmp z80a,r0,lsl#24
+	subs r2,z80a,r0,lsl#24
 	and z80f,z80f,#1<<CFlag
 	orr z80f,z80f,#1<<NFlag
 	orrmi z80f,z80f,#1<<SFlag
 	orreq z80f,z80f,#1<<ZFlag
 	cmp r1,r0,lsl#28
 	orrcc z80f,z80f,#1<<HFlag
+	subcc r2,r2,#1
+	tst r2,#0x8<<24
+	orrne z80f,z80f,#1<<Flag3
+	tst r2,#0x2<<24
+	orrne z80f,z80f,#1<<Flag5
 	subs z80bc,z80bc,#1<<16
 	bne opcode_ED_B9_decpc
 	fetch 16

@@ -3,7 +3,9 @@
 if [ `md5sum /usr/games/PicoDrive | cut -d' ' -f1` != `md5sum PicoDrive | cut -d' ' -f1` ]; then
 	rw
 	cp -f PicoDrive /usr/games
-	sed -i 's|list.extensions.*|list.extensions = zip,ZIP,sms,SMS,bin,BIN,gg,GG|' /usr/games/collections/Sega\ Master\ System/settings.conf
 	ro
 fi
-exec /usr/games/launchers/megadrive_launch.sh "$1"
+./PicoDrive "$1"&
+pid record $!
+wait $!
+pid erase

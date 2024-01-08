@@ -11,10 +11,6 @@
 #include "cdd.h"
 #include "cd_parse.h"
 
-#ifdef USE_LIBRETRO_VFS
-#include "file_stream_transforms.h"
-#endif
-
 #if defined(__GNUC__) && __GNUC__ >= 7
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 #endif
@@ -53,6 +49,7 @@ static int handle_mp3(const char *fname, int index)
     return -1;
   }
 
+  track->type = CT_AUDIO;
   track->fd = tmp_file;
   track->offset = 0;
 
@@ -118,10 +115,11 @@ int load_cd_image(const char *cd_img_name, int *type)
   }
   tracks[0].fd = pmf;
   tracks[0].fname = strdup(cd_img_name);
+  tracks[0].type = *type & CT_AUDIO;
 
   if (*type == CT_ISO)
-       cd_img_sectors = pmf->size >>= 11;  // size in sectors
-  else cd_img_sectors = pmf->size /= 2352;
+       cd_img_sectors = pmf->size >> 11;  // size in sectors
+  else cd_img_sectors = pmf->size / 2352;
 
   // cdd.c operates with lba - 150
   tracks[0].start = 0;
@@ -129,8 +127,8 @@ int load_cd_image(const char *cd_img_name, int *type)
   tracks[0].offset = 0;
 
   sprintf_lba(tmp_ext, sizeof(tmp_ext), 0);
-  elprintf(EL_STATUS, "Track  1: %s %9i DATA  %s",
-    tmp_ext, tracks[0].end, cd_img_name);
+  elprintf(EL_STATUS, "Track  1: %s %9i %s %s",
+    tmp_ext, tracks[0].end, tracks[0].type ? "AUDIO" : "DATA ", cd_img_name);
 
   lba = cd_img_sectors;
 
@@ -189,13 +187,15 @@ int load_cd_image(const char *cd_img_name, int *type)
         length = cue_data->tracks[n].sector_xlength;
 
       Pico_mcd->cdda_type = cue_data->tracks[n].type;
+      tracks[index].type = cue_data->tracks[n].type & CT_AUDIO;
 
       tracks[index].start = lba;
       lba += length;
       tracks[index].end = lba;
 
       sprintf_lba(tmp_ext, sizeof(tmp_ext), tracks[index].start);
-      elprintf(EL_STATUS, "Track %2i: %s %9i AUDIO %s", n, tmp_ext, length,
+      elprintf(EL_STATUS, "Track %2i: %s %9i %s %s", n, tmp_ext, length,
+          tracks[index].type ? "AUDIO" : "DATA ",
           cue_data->tracks[n].fname ? cue_data->tracks[n].fname : "");
     }
     goto finish;
@@ -250,6 +250,7 @@ int load_cd_image(const char *cd_img_name, int *type)
         tracks[index].end = lba;
 
         Pico_mcd->cdda_type = CT_MP3;
+        tracks[index].type = CT_AUDIO;
 
         sprintf_lba(tmp_ext, sizeof(tmp_ext), tracks[index].start);
         elprintf(EL_STATUS, "Track %2i: %s %9i AUDIO - %s",
@@ -267,6 +268,7 @@ int load_cd_image(const char *cd_img_name, int *type)
 finish:
   cdd.toc.last = n - 1;
   cdd.toc.end = lba;
+  tracks[n].start = cdd.toc.end;
 
   sprintf_lba(tmp_ext, sizeof(tmp_ext), cdd.toc.end);
   elprintf(EL_STATUS, "End CD -  %s\n", tmp_ext);

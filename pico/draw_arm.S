@@ -15,13 +15,12 @@
 
 .extern DrawStripInterlace
 
-.equ PDRAW_SPRITES_MOVED, (1<<0)
 .equ PDRAW_WND_DIFF_PRIO, (1<<1)
-.equ PDRAW_PARSE_SPRITES, (1<<2)
-.equ PDRAW_DIRTY_SPRITES, (1<<4)
 .equ PDRAW_PLANE_HI_PRIO, (1<<6)
 .equ PDRAW_SHHI_DONE,     (1<<7)
+.equ PDRAW_BORDER_32,     (1<<9)
 .equ PDRAW_32X_SCALE,     (1<<12)
+.equ PDRAW_SOFTSCALE,     (1<<15)
 
 @ helpers
 .macro add_c24 d s c
@@ -80,7 +79,7 @@
     beq     0f
     cmp     r4, #0xe
     orr     r4, r3, r4
-    biceq   r4, #0x80
+    biceq   r4, r4, #0x80
     strb    r4, [r1,#\offs]
 0:
 .endm
@@ -388,8 +387,8 @@ DrawLayer:
     beq     0f
     cmp     r3, #2
     mov     r3, r2, lsl #2        @ htab+=DrawScanline<<1; // Offset by line
-    biceq   r3, #0x1f             @ htab&=~0xf; // Offset by tile
-    andlt   r3, #0x1f
+    biceq   r3, r3, #0x1f         @ htab&=~0xf; // Offset by tile
+    andlt   r3, r3, #0x1f
     add     r4, r4, r3
 0:  add     r4, r4, r0, lsl #1    @ htab+=plane
     bic     r4, r4, #0x00ff0000   @ just in case
@@ -614,7 +613,7 @@ DrawLayer:
     @ r4 & r7 are scratch in this loop
 
     @ need to calc new ty?
-    lsls    r7, r10, #7           @ (cell&1)?
+    movs    r7, r10, lsl #7       @ (cell&1)?
     bmi     .dsloop_vs_subr1
 
     @ calc offset and read tileline code to r7, also calc ty
@@ -647,7 +646,7 @@ DrawLayer:
     ble     .dsloop_vs_exit
 
     @ need to calc new ty?
-    lsls    r7, r10, #7           @ (cell&1)?
+    movs    r7, r10, lsl #7       @ (cell&1)?
     bmi     0f
 
     @ calc offset and read tileline code to r7, also calc ty
@@ -800,11 +799,7 @@ DrawLayer:
 BackFill:
     stmfd   sp!, {r4-r9,lr}
 
-    mov     r0, r0, lsl #26
     ldr     lr, [r2, #OFS_EST_HighCol]
-    mov     r0, r0, lsr #26
-    add     lr, lr, #8
-
     orr     r0, r0, r1, lsl #7
     orr     r0, r0, r0, lsl #8
     orr     r0, r0, r0, lsl #16
@@ -818,6 +813,7 @@ BackFill:
     mov     r7, r0
 
     @ go go go!
+    add     lr, lr, #8
     stmia   lr!, {r0-r7} @ 10*8*4
     stmia   lr!, {r0-r7}
     stmia   lr!, {r0-r7}
@@ -1648,37 +1644,50 @@ FinalizeLine555:
     ldr     r5, [r11, #OFS_EST_PicoOpt]
     ldr     r1, [r11, #OFS_EST_HighCol]
     ldr     r0, [r11, #OFS_EST_DrawLineDest]
-    ldr     r4, [r5]
+    ldr     r4, [r11, #OFS_EST_rendstatus]
     ldr     r7, [r5, #OFS_PicoIn_AHW-OFS_PicoIn_opt]
     ldrb    r12,[r8, #OFS_Pico_video_reg+12]
+    ldrb    r6, [r8, #OFS_Pico_video_reg+0]
     ldr     r2, [r8, #OFS_Pico_m_hardware]
     add     r1, r1, #8
 
-    tst     r7, #0x10
-    beq     .fl_no20colRGB555
-    and     r7, r2, #0x3
-    cmp     r7, #0x3		@ Game Gear, LCD?
-    bne     .fl_no20colRGB555
+    tst     r7, #0x20   	@ GG ?
+    tstne   r2, #0x2		@ LCD ?
+    bne     .fl_gg20col
 
+    tst     r7, #0x10   	@ SMS ?
+    beq     .fl_noSMS
+
+    tst     r6, #0x20
+    movne   r2, #248/8  	@ len = 248
+    addne   r1, r1, #8  	@ ps += 8
+    moveq   r2, #256/8		@ len = 256
+    b       .fl_check32scaling
+
+.fl_gg20col:
     mov     r2, #160/8		@ len = 160
-    tst     r4, #0x4000		@ EN_SOFTSCALE?
+    tst     r4, #PDRAW_SOFTSCALE
     bne     .fl_20scale_RGB555	@ scale 160->320
-    beq     .fl_checkborder
+    b       .fl_checkborder
 
-.fl_no20colRGB555:
+.fl_noSMS:
     tst     r12, #1		@ h32?
     movne   r2, #320/8          @ len = 320
-    bne     .fl_no32colRGB555
-    moveq   r2, #256/8		@ len = 256
-    tst     r4, #0x4000		@ EN_SOFTSCALE?
+    bne     .fl_40colRGB555
+    mov     r2, #256/8		@ len = 256
+
+.fl_check32scaling:
+    tst     r4, #PDRAW_SOFTSCALE
+    rsbne   r7, r2, #256/8
+    addne   r0, r0, r7, lsl #3	@ pd += (256-len)>>1
     bne     .fl_32scale_RGB555	@ scale 256->320
 
 .fl_checkborder:
-    tst     r4, #0x0100		@ DIS_32C_BORDER?
-    rsbeq   r4, r2, #320/8	@ pd += (320-len)/2
-    addeq   r0, r0, r4, lsl #3
+    tst     r4, #PDRAW_BORDER_32
+    rsbne   r7, r2, #320/8	@ pd += (320-len)/2
+    addne   r0, r0, r7, lsl #3
 
-.fl_no32colRGB555:
+.fl_40colRGB555:
 #ifdef UNALIGNED_DRAWLINEDEST
     @ this is basically for Gizmondo, which has unaligned odd lines in the framebuffer
     tst     r0, #2
@@ -2018,7 +2027,7 @@ FinalizeLine555:
     and     r6, lr, r12, lsr #15
     ldrh    r6, [r3, r6]
     and     r8 ,lr, r12, lsr #23
-    ldrh    r8 ,[r3, r8 ]
+    ldrh    r8 ,[r3, r8]
 
     orr     r4, r4, r4, lsl #16
     orr     r5, r5, r5, lsl #16
@@ -2052,7 +2061,7 @@ FinalizeLine555:
     and     r8, lr, r8, lsl #1
     ldrh    r8, [r3, r8]
     and     r8, r8, r9
-    lsl     r8, r8, #16
+    mov     r8, r8, lsl #16
 
 .fl_20loop_bl2:
     ldr     r12, [r1], #4
@@ -2250,24 +2259,51 @@ blockcpy:
     cmp     r0, r1
     bhs     blockcpyhi
 
-    mov     r2, r2, lsr #4
+    subs    r2, r2, #16
+    blt     blockcpy2
 blockcpy_loop:
     ldmia   r1!, {r3-r5,r12}
-    subs    r2, r2, #1
+    subs    r2, r2, #16
     stmia   r0!, {r3-r5,r12}
-    bne     blockcpy_loop
+    bge     blockcpy_loop
+
+blockcpy2:
+    adds    r2, r2, #16-4
+    ldmltfd sp!, {r4,r5}
+    bxlt    lr
+
+blockcpy_loop2:
+    ldr     r3, [r1], #4
+    subs    r2, r2, #4
+    str     r3, [r0], #4
+    bge     blockcpy_loop2
+
     ldmfd   sp!, {r4,r5}
     bx      lr
 
 blockcpyhi:
     add     r0, r0, r2
     add     r1, r1, r2
-    mov     r2, r2, lsr #4
+
+    subs    r2, r2, #16
+    blt     blockcpyhi2
 blockcpyhi_loop:
     ldmdb   r1!, {r3-r5,r12}
-    subs    r2, r2, #1
+    subs    r2, r2, #16
     stmdb   r0!, {r3-r5,r12}
-    bne     blockcpyhi_loop
+    bge     blockcpyhi_loop
+
+blockcpyhi2:
+    adds    r2, r2, #16-4
+    ldmltfd sp!, {r4,r5}
+    bxlt    lr
+
+blockcpyhi_loop2:
+    ldr     r3, [r1, #-4]!
+    subs    r2, r2, #4
+    str     r3, [r0, #-4]!
+    bge     blockcpyhi_loop2
+
     ldmfd   sp!, {r4,r5}
     bx      lr
 
@@ -2281,32 +2317,61 @@ blockcpy_or:
     cmp     r0, r1
     bhs     blockcpyhi_or
 
-    mov     r2, r2, lsr #4
+    subs    r2, r2, #16
+    blt     blockcpy_or2
 blockcpy_loop_or:
     ldmia   r1!, {r4-r6,r12}
-    subs    r2, r2, #1
+    subs    r2, r2, #16
     orr     r4, r4, r3
     orr     r5, r5, r3
     orr     r6, r6, r3
     orr     r12,r12,r3
     stmia   r0!, {r4-r6,r12}
-    bne     blockcpy_loop_or
+    bge     blockcpy_loop_or
+
+blockcpy_or2:
+    adds    r2, r2, #16-4
+    ldmltfd sp!, {r4-r6}
+    bxlt    lr
+
+blockcpy_loop_or2:
+    ldr     r4, [r1], #4
+    subs    r2, r2, #4
+    orr     r4, r4, r3
+    str     r4, [r0], #4
+    bge     blockcpy_loop_or2
+
     ldmfd   sp!, {r4-r6}
     bx      lr
 
 blockcpyhi_or:
     add     r0, r0, r2
     add     r1, r1, r2
-    mov     r2, r2, lsr #4
+
+    subs    r2, r2, #16
+    blt     blockcpyhi_or2
 blockcpyhi_loop_or:
     ldmdb   r1!, {r4-r6,r12}
-    subs    r2, r2, #1
+    subs    r2, r2, #16
     orr     r4, r4, r3
     orr     r5, r5, r3
     orr     r6, r6, r3
     orr     r12,r12,r3
     stmdb   r0!, {r4-r6,r12}
-    bne     blockcpyhi_loop_or
+    bge     blockcpyhi_loop_or
+
+blockcpyhi_or2:
+    adds    r2, r2, #16-4
+    ldmltfd sp!, {r4-r6}
+    bxlt    lr
+
+blockcpyhi_loop_or2:
+    ldr     r4, [r1, #-4]!
+    subs    r2, r2, #4
+    orr     r4, r4, r3
+    str     r4, [r0, #-4]!
+    bge     blockcpyhi_loop_or2
+
     ldmfd   sp!, {r4-r6}
     bx      lr
 

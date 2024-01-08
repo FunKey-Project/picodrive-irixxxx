@@ -73,7 +73,7 @@ enum { OP_ADDI=010, OP_ADDIU, OP_SLTI, OP_SLTIU, OP_ANDI, OP_ORI, OP_XORI, OP_LU
 enum { OP_DADDI=030, OP_DADDIU, OP_LDL, OP_LDR, OP__FN2=034, OP__FN3=037 };
 enum { OP_LB=040, OP_LH, OP_LWL, OP_LW, OP_LBU, OP_LHU, OP_LWR, OP_LWU };
 enum { OP_SB=050, OP_SH, OP_SWL, OP_SW, OP_SDL, OP_SDR, OP_SWR };
-enum { OP_SD=067, OP_LD=077 };
+enum { OP_LD=067, OP_SD=077 };
 // function field (encoded in fn if opcode = OP__FN)
 enum { FN_SLL=000, __(01), FN_SRL, FN_SRA, FN_SLLV, __(05), FN_SRLV, FN_SRAV };
 enum { FN_JR=010, FN_JALR, FN_MOVZ, FN_MOVN, FN_SYNC=017 };
@@ -235,8 +235,8 @@ enum { RB_SRL=0, RB_ROTR=1 };
 #define MIPS_BGT (OP_BGTZ << 5)			// rs >  0
 #define MIPS_BLT ((OP__RT << 5)|RT_BLTZ)	// rs <  0
 #define MIPS_BGE ((OP__RT << 5)|RT_BGEZ)	// rs >= 0
-#define MIPS_BGTL ((OP__RT << 5)|RT_BLTZAL)	// rs >  0, link $ra if jumping
-#define MIPS_BGEL ((OP__RT << 5)|RT_BGEZAL)	// rs >= 0, link $ra if jumping
+#define MIPS_BLTL ((OP__RT << 5)|RT_BLTZAL)	// rs >  0, always link $ra
+#define MIPS_BGEL ((OP__RT << 5)|RT_BGEZAL)	// rs >= 0, always link $ra
 
 #define MIPS_BCOND(cond, rs, rt, offs16) \
 	MIPS_OP_IMM((cond >> 5), rt, rs, (offs16) >> 2)
@@ -693,6 +693,8 @@ static void emith_set_compare_flags(int rs, int rt, s32 imm)
 #define emith_eor_r_r_lsr(d, s, lsrimm) \
 	emith_eor_r_r_r_lsr(d, d, s, lsrimm)
 
+#define emith_add_r_r_r_ptr(d, s1, s2) \
+	emith_add_r_r_r_lsl_ptr(d, s1, s2, 0)
 #define emith_add_r_r_r(d, s1, s2) \
 	emith_add_r_r_r_lsl(d, s1, s2, 0)
 
@@ -807,20 +809,71 @@ static void emith_set_compare_flags(int rs, int rt, s32 imm)
 
 
 // move immediate
+#define MAX_HOST_LITERALS	32	// pool must be smaller than 32 KB
+static uintptr_t literal_pool[MAX_HOST_LITERALS];
+static u32 *literal_insn[MAX_HOST_LITERALS];
+static int literal_pindex, literal_iindex;
+
+static inline int emith_pool_literal(uintptr_t imm)
+{
+	int idx = literal_pindex - 8; // max look behind in pool
+	// see if one of the last literals was the same
+	for (idx = (idx < 0 ? 0 : idx); idx < literal_pindex; idx++)
+		if (imm == literal_pool[idx])
+			break;
+	if (idx == literal_pindex)	// store new literal
+		literal_pool[literal_pindex++] = imm;
+	return idx;
+}
+
+static void emith_pool_commit(int jumpover)
+{
+	int i, sz = literal_pindex * sizeof(uintptr_t);
+	u8 *pool = (u8 *)tcache_ptr;
+
+	// nothing to commit if pool is empty
+	if (sz == 0)
+		return;
+	// align pool to pointer size
+	if (jumpover)
+		pool += sizeof(u32);
+	i = (uintptr_t)pool & (sizeof(void *)-1);
+	pool += (i ? sizeof(void *)-i : 0);
+	// need branch over pool if not at block end
+	if (jumpover)
+		emith_branch(MIPS_B(sz + (pool-(u8 *)tcache_ptr)));
+	emith_flush();
+	// safety check - pool must be after insns and reachable
+	if ((u32)(pool - (u8 *)literal_insn[0] + 8) > 0x7fff) {
+		elprintf(EL_STATUS|EL_SVP|EL_ANOMALY,
+			"pool offset out of range");
+		exit(1);
+	}
+	// copy pool and adjust addresses in insns accessing the pool
+	memcpy(pool, literal_pool, sz);
+	for (i = 0; i < literal_iindex; i++) {
+		u32 *pi = literal_insn[i];
+		*pi = (*pi & 0xffff0000) | (u16)(*pi + ((u8 *)pool - (u8 *)pi));
+	}
+	// count pool constants as insns for statistics
+	for (i = 0; i < literal_pindex * sizeof(uintptr_t)/sizeof(u32); i++)
+		COUNT_OP;
+
+	tcache_ptr = (void *)((u8 *)pool + sz);
+	literal_pindex = literal_iindex = 0;
+}
+
+static void emith_pool_check(void)
+{
+	// check if pool must be committed
+	if (literal_iindex > MAX_HOST_LITERALS-4 || (literal_pindex &&
+		    (u8 *)tcache_ptr - (u8 *)literal_insn[0] > 0x7000))
+		// pool full, or displacement is approaching the limit
+		emith_pool_commit(1);
+}
+
 static void emith_move_imm(int r, uintptr_t imm)
 {
-#if _MIPS_SZPTR == 64
-	if ((s32)imm != imm) {
-		emith_move_imm(r, imm >> 32);
-		if (imm & 0xffff0000) {
-			EMIT(MIPS_DLSL_IMM(r, r, 16));
-			EMIT(MIPS_OR_IMM(r, r, (imm >> 16) & 0xffff));
-			EMIT(MIPS_DLSL_IMM(r, r, 16));
-		} else	EMIT(MIPS_DLSL32_IMM(r, r, 0));
-		if (imm & 0x0000ffff)
-			EMIT(MIPS_OR_IMM(r, r, imm & 0xffff));
-	} else
-#endif
 	if ((s16)imm == imm) {
 		EMIT(MIPS_ADD_IMM(r, Z0, imm));
 	} else if (!((u32)imm >> 16)) {
@@ -835,12 +888,36 @@ static void emith_move_imm(int r, uintptr_t imm)
 			EMIT(MIPS_OR_IMM(r, s, (u16)imm));
 	}
 }
+static void emith_move_ptr_imm(int r, uintptr_t imm)
+{
+#if _MIPS_SZPTR == 64
+	uintptr_t offs = (u8 *)imm - (u8 *)tcache_ptr - 8;
+	if ((s32)imm != imm && (s32)offs == offs) {
+		// PC relative
+		emith_flush(); // next insn must not change its position at all
+		EMIT_PTR(tcache_ptr, MIPS_BCONDZ(MIPS_BLTL, Z0, 0)); // loads PC+8 into LR
+		emith_move_imm(r, offs);
+		emith_add_r_r_r_ptr(r, LR, r);
+	} else if ((s32)imm != imm) {
+		// via literal pool
+		int idx;
+		if (literal_iindex >= MAX_HOST_LITERALS)
+			emith_pool_commit(1);
+		idx = emith_pool_literal(imm);
+		emith_flush(); // next 2 must not change their position at all
+		EMIT_PTR(tcache_ptr, MIPS_BCONDZ(MIPS_BLTL, Z0, 0)); // loads PC+8 into LR
+		literal_insn[literal_iindex++] = (u32 *)tcache_ptr;
+		EMIT_PTR(tcache_ptr, MIPS_OP_IMM(OP_LP, r, LR, idx*sizeof(uintptr_t) - 4));
+	} else
+#endif
+		emith_move_imm(r, imm);
+}
 
 #define emith_move_r_ptr_imm(r, imm) \
-	emith_move_imm(r, (uintptr_t)(imm))
+	emith_move_ptr_imm(r, (uintptr_t)(imm))
 
 #define emith_move_r_imm(r, imm) \
-	emith_move_imm(r, (u32)(imm))
+	emith_move_imm(r, (s32)(imm))
 #define emith_move_r_imm_c(cond, r, imm) \
 	emith_move_r_imm(r, imm)
 
@@ -1185,12 +1262,12 @@ static void emith_lohi_nops(void)
 	emith_read_r_r_offs(r, rs, offs)
  
 #define emith_read_r_r_r_ptr(r, rs, rm) do { \
-	emith_add_r_r_r(AT, rs, rm); \
+	emith_add_r_r_r_ptr(AT, rs, rm); \
 	EMIT(MIPS_OP_IMM(OP_LP, r, AT, 0)); \
 } while (0)
 
 #define emith_read_r_r_r(r, rs, rm) do { \
-	emith_add_r_r_r(AT, rs, rm); \
+	emith_add_r_r_r_ptr(AT, rs, rm); \
 	EMIT(MIPS_LW(r, AT, 0)); \
 } while (0)
 #define emith_read_r_r_r_c(cond, r, rs, rm) \
@@ -1202,7 +1279,7 @@ static void emith_lohi_nops(void)
 	emith_read8_r_r_offs(r, rs, offs)
 
 #define emith_read8_r_r_r(r, rs, rm) do { \
-	emith_add_r_r_r(AT, rs, rm); \
+	emith_add_r_r_r_ptr(AT, rs, rm); \
 	EMIT(MIPS_LBU(r, AT, 0)); \
 } while (0)
 #define emith_read8_r_r_r_c(cond, r, rs, rm) \
@@ -1214,7 +1291,7 @@ static void emith_lohi_nops(void)
 	emith_read16_r_r_offs(r, rs, offs)
 
 #define emith_read16_r_r_r(r, rs, rm) do { \
-	emith_add_r_r_r(AT, rs, rm); \
+	emith_add_r_r_r_ptr(AT, rs, rm); \
 	EMIT(MIPS_LHU(r, AT, 0)); \
 } while (0)
 #define emith_read16_r_r_r_c(cond, r, rs, rm) \
@@ -1226,7 +1303,7 @@ static void emith_lohi_nops(void)
 	emith_read8s_r_r_offs(r, rs, offs)
 
 #define emith_read8s_r_r_r(r, rs, rm) do { \
-	emith_add_r_r_r(AT, rs, rm); \
+	emith_add_r_r_r_ptr(AT, rs, rm); \
 	EMIT(MIPS_LB(r, AT, 0)); \
 } while (0)
 #define emith_read8s_r_r_r_c(cond, r, rs, rm) \
@@ -1238,7 +1315,7 @@ static void emith_lohi_nops(void)
 	emith_read16s_r_r_offs(r, rs, offs)
 
 #define emith_read16s_r_r_r(r, rs, rm) do { \
-	emith_add_r_r_r(AT, rs, rm); \
+	emith_add_r_r_r_ptr(AT, rs, rm); \
 	EMIT(MIPS_LH(r, AT, 0)); \
 } while (0)
 #define emith_read16s_r_r_r_c(cond, r, rs, rm) \
@@ -1251,7 +1328,7 @@ static void emith_lohi_nops(void)
 	emith_write_r_r_offs_ptr(r, rs, offs)
 
 #define emith_write_r_r_r_ptr(r, rs, rm) do { \
-	emith_add_r_r_r(AT, rs, rm); \
+	emith_add_r_r_r_ptr(AT, rs, rm); \
 	EMIT(MIPS_OP_IMM(OP_SP, r, AT, 0)); \
 } while (0)
 #define emith_write_r_r_r_ptr_c(cond, r, rs, rm) \
@@ -1263,7 +1340,7 @@ static void emith_lohi_nops(void)
 	emith_write_r_r_offs(r, rs, offs)
 
 #define emith_write_r_r_r(r, rs, rm) do { \
-	emith_add_r_r_r(AT, rs, rm); \
+	emith_add_r_r_r_ptr(AT, rs, rm); \
 	EMIT(MIPS_SW(r, AT, 0)); \
 } while (0)
 #define emith_write_r_r_r_c(cond, r, rs, rm) \
@@ -1316,14 +1393,17 @@ static void emith_lohi_nops(void)
 	if (_s) emith_add_r_r_ptr_imm(SP, SP, _s); \
 } while (0)
 
+#define host_call(addr, args) \
+	addr
+
 #define host_arg2reg(rd, arg) \
 	rd = (arg+4)
 
 #define emith_pass_arg_r(arg, reg) \
-	emith_move_r_r(arg, reg)
+	emith_move_r_r_ptr(arg, reg)
 
 #define emith_pass_arg_imm(arg, imm) \
-	emith_move_r_imm(arg, imm)
+	emith_move_r_ptr_imm(arg, imm)
 
 // branching
 #define emith_invert_branch(cond) /* inverted conditional branch */ \
@@ -1525,7 +1605,7 @@ static int emith_cond_check(int cond, int *r)
 
 #define emith_call_reg(r) \
 	emith_branch(MIPS_JALR(LR, r))
-#define emith_call_ctx(offs) do { \
+#define emith_abicall_ctx(offs) do { \
 	emith_ctx_read_ptr(CR, offs); \
 	emith_call_reg(CR); \
 } while (0)
@@ -1578,8 +1658,6 @@ static int emith_cond_check(int cond, int *r)
 
 
 // emitter ABI stuff
-#define emith_pool_check()	/**/
-#define emith_pool_commit(j)	/**/
 #define	emith_update_cache()	/**/
 #define emith_rw_offs_max()	0x7fff
 #define emith_uext_ptr(r)	/**/
@@ -1643,9 +1721,9 @@ static NOINLINE void host_instructions_updated(void *base, void *end, int force)
 #define emith_sh2_wcall(a, val, tab, func) do { \
 	emith_lsr(func, a, SH2_WRITE_SHIFT); \
 	emith_lsl(func, func, PTR_SCALE); \
-	emith_read_r_r_r_ptr(func, tab, func); \
+	emith_read_r_r_r_ptr(CR, tab, func); \
 	emith_move_r_r_ptr(6, CONTEXT_REG); /* arg2 */ \
-	emith_abijump_reg(func); \
+	emith_abijump_reg(CR); \
 } while (0)
 
 #define emith_sh2_delay_loop(cycles, reg) do {			\

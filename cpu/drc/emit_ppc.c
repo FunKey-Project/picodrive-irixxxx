@@ -40,6 +40,7 @@
 // reserved: r0(zero), r1(stack), r2(TOC), r13(TID)
 // additionally reserved on OSX: r31(PIC), r30(frame), r11(parentframe)
 // for OSX PIC code, on function calls r12 must contain the called address
+#define TOC_REG		2
 #define RET_REG		3
 #define PARAM_REGS	{ 3, 4, 5, 6, 7, 8, 9, 10 }
 #define PRESERVED_REGS	{ 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29 }
@@ -419,23 +420,19 @@ enum { OPS_STD, OPS_STDU /*,OPS_STQ*/ };
 
 // "long" multiplication, 32x32 bit = 64 bit
 #define EMIT_PPC_MULLU_REG(dlo, dhi, s1, s2) do { \
-	EMIT(PPC_EXTUW_REG(s1, s1)); \
-	EMIT(PPC_EXTUW_REG(s2, s2)); \
-	EMIT(PPC_MULL(dlo, s1, s2)); \
-	EMIT(PPC_ASR_IMM(dhi, dlo, 32)); \
+	int at = (dlo == s1 || dlo == s2 ? AT : dlo); \
+	EMIT(PPC_MUL(at, s1, s2)); \
+	EMIT(PPC_MULHU(dhi, s1, s2)); \
+	if (at != dlo) emith_move_r_r(dlo, at); \
 } while (0)
 
 #define EMIT_PPC_MULLS_REG(dlo, dhi, s1, s2) do { \
-	EMIT(PPC_EXTSW_REG(s1, s1)); \
-	EMIT(PPC_EXTSW_REG(s2, s2)); \
-	EMIT(PPC_MULL(dlo, s1, s2)); \
+	EMIT(PPC_MUL(dlo, s1, s2)); \
 	EMIT(PPC_ASR_IMM(dhi, dlo, 32)); \
 } while (0)
 
 #define EMIT_PPC_MACLS_REG(dlo, dhi, s1, s2) do { \
-	EMIT(PPC_EXTSW_REG(s1, s1)); \
-	EMIT(PPC_EXTSW_REG(s2, s2)); \
-	EMIT(PPC_MULL(AT, s1, s2)); \
+	EMIT(PPC_MUL(AT, s1, s2)); \
 	EMIT(PPC_BFI_IMM(dlo, dhi, 0, 32)); \
 	emith_add_r_r(dlo, AT); \
 	EMIT(PPC_ASR_IMM(dhi, dlo, 32)); \
@@ -1307,14 +1304,25 @@ static void emith_add_imm(int rt, int ra, u32 imm)
 	if (_s) emith_add_r_r_ptr_imm(SP, SP, _s); \
 } while (0)
 
+#if defined __PS3__
+// on PS3 a C function pointer points to an array of 2 ptrs containing the start
+// address and the TOC pointer for this function. TOC isn't used by the DRC though.
+static void *fptr[2];
+#define host_call(addr, args)	(fptr[0] = addr, (void (*) args)fptr)
+#else
+// with ELF we have the PLT which wraps functions needing any ABI register setup,
+// hence a function ptr is simply the entry address of the function to execute.
+#define host_call(addr, args)	addr
+#endif
+
 #define host_arg2reg(rt, arg) \
 	rt = (arg+3)
 
 #define emith_pass_arg_r(arg, reg) \
-	emith_move_r_r(arg, reg)
+	emith_move_r_r_ptr(arg, reg)
 
 #define emith_pass_arg_imm(arg, imm) \
-	emith_move_r_imm(arg, imm)
+	emith_move_r_ptr_imm(arg, imm)
 
 // branching
 #define emith_invert_branch(cond) /* inverted conditional branch */ \
@@ -1449,7 +1457,7 @@ static int emith_cond_check(int cond)
 
 #define emith_jump_cond_inrange(target) \
 	((u8 *)target - (u8 *)tcache_ptr <   0x8000 && \
-	 (u8 *)target - (u8 *)tcache_ptr >= -0x8000+0x10) //mind cond_check
+	 (u8 *)target - (u8 *)tcache_ptr >= -0x8000+0x14) //mind cond_check
 
 // NB: returns position of patch for cache maintenance
 #define emith_jump_patch(ptr, target, pos) do { \
@@ -1500,24 +1508,40 @@ static int emith_cond_check(int cond)
 	EMIT(PPC_BLCTRCOND(BXX)); \
 } while(0)
 
-#define emith_call_ctx(offs) do { \
+#define emith_abicall_ctx(offs) do { \
 	emith_ctx_read_ptr(CR, offs); \
-	emith_call_reg(CR); \
+	emith_abicall_reg(CR); \
 } while (0)
 
+#ifdef __PS3__
+#define emith_abijump_reg(r) \
+	emith_read_r_r_offs_ptr(TOC_REG, r, PTR_SIZE); \
+	emith_read_r_r_offs_ptr(CR, r, 0); \
+	emith_jump_reg(CR)
+#else
 #define emith_abijump_reg(r) \
 	if ((r) != CR) emith_move_r_r(CR, r); \
 	emith_jump_reg(CR)
+#endif
 #define emith_abijump_reg_c(cond, r) \
 	emith_abijump_reg(r)
 #define emith_abicall(target) \
 	emith_move_r_ptr_imm(CR, target); \
-	emith_call_reg(CR);
+	emith_abicall_reg(CR);
 #define emith_abicall_cond(cond, target) \
 	emith_abicall(target)
-#define emith_abicall_reg(r) \
+#ifdef __PS3__
+#define emith_abicall_reg(r) do { \
+	emith_read_r_r_offs_ptr(TOC_REG, r, PTR_SIZE); \
+	emith_read_r_r_offs_ptr(CR, r, 0); \
+	emith_call_reg(CR); \
+} while(0)
+#else
+#define emith_abicall_reg(r) do { \
 	if ((r) != CR) emith_move_r_r(CR, r); \
-	emith_call_reg(CR)
+	emith_call_reg(CR); \
+} while(0)
+#endif
 
 #define emith_call_cleanup()	/**/
 
@@ -1631,9 +1655,9 @@ static NOINLINE void host_instructions_updated(void *base, void *end, int force)
 #define emith_sh2_wcall(a, val, tab, func) do { \
 	emith_lsr(func, a, SH2_WRITE_SHIFT); \
 	emith_lsl(func, func, PTR_SCALE); \
-	emith_read_r_r_r_ptr(func, tab, func); \
+	emith_read_r_r_r_ptr(CR, tab, func); \
 	emith_move_r_r_ptr(5, CONTEXT_REG); /* arg2 */ \
-	emith_jump_reg(func); \
+	emith_abijump_reg(CR); \
 } while (0)
 
 #define emith_sh2_delay_loop(cycles, reg) do {			\

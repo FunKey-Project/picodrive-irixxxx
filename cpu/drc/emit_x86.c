@@ -519,15 +519,23 @@ enum { xAX = 0, xCX, xDX, xBX, xSP, xBP, xSI, xDI,	// x86-64,i386 common
 
 // _r_r_imm - use lea
 #define emith_add_r_r_imm(d, s, imm) do { \
-	EMIT_REX_IF(0, d, s); \
-	emith_deref_modrm(0x8d, 2, d, s); \
-	EMIT(imm, s32); \
+	if (imm == 0) \
+		emith_move_r_r(d, s); \
+	else { \
+		EMIT_REX_IF(0, d, s); \
+		emith_deref_modrm(0x8d, 2, d, s); \
+		EMIT(imm, s32); \
+	} \
 } while (0)
 
 #define emith_add_r_r_ptr_imm(d, s, imm) do { \
-	EMIT_REX_IF(1, d, s); \
-	emith_deref_modrm(0x8d, 2, d, s); \
-	EMIT(imm, s32); \
+	if (imm == 0) \
+		emith_move_r_r_ptr(d, s); \
+	else { \
+		EMIT_REX_IF(1, d, s); \
+		emith_deref_modrm(0x8d, 2, d, s); \
+		EMIT(imm, s32); \
+	} \
 } while (0)
 
 #define emith_sub_r_r_imm(d, s, imm) do { \
@@ -929,7 +937,7 @@ enum { xAX = 0, xCX, xDX, xBX, xSP, xBP, xSI, xDI,	// x86-64,i386 common
 	EMIT_OP_MODRM(0xff, 3, 2, (r)&7); \
 } while (0)
 
-#define emith_call_ctx(offs) do { \
+#define emith_abicall_ctx(offs) do { \
 	EMIT_OP_MODRM(0xff, 2, 2, CONTEXT_REG); \
 	EMIT(offs, u32); \
 } while (0)
@@ -1027,13 +1035,16 @@ enum { xAX = 0, xCX, xDX, xBX, xSP, xBP, xSI, xDI,	// x86-64,i386 common
 #define emith_pass_arg_imm(arg, imm) do { \
 	int rd = 7; \
 	host_arg2reg(rd, arg); \
-	emith_move_r_imm(rd, imm); \
+	emith_move_r_ptr_imm(rd, imm); \
 } while (0)
 
 #define host_instructions_updated(base, end, force)	(void)(base),(void)(end)
 #define	emith_update_cache()	/**/
 
 #define emith_rw_offs_max()	0xffffffffU
+
+#define host_call(addr, args) \
+	addr
 
 #ifdef __x86_64__
 
@@ -1221,7 +1232,7 @@ enum { xAX = 0, xCX, xDX, xBX, xSP, xBP, xSI, xDI,	// x86-64,i386 common
 	EMIT_OP_MODRM64(0x8b, 0, func, 4); \
 	EMIT_SIB64(PTR_SCALE, func, tab); /* mov tmp, [tab + tmp * {4,8}] */ \
 	emith_move_r_r_ptr(arg2_, CONTEXT_REG); \
-	emith_jump_reg(func); \
+	emith_abijump_reg(func); \
 } while (0)
 
 #define emith_sh2_dtbf_loop() do { \

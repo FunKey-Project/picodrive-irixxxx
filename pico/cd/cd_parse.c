@@ -13,10 +13,6 @@
 #include "cd_parse.h"
 // #define elprintf(w,f,...) printf(f "\n",##__VA_ARGS__);
 
-#ifdef USE_LIBRETRO_VFS
-#include "file_stream_transforms.h"
-#endif
-
 #if defined(USE_LIBCHDR)
 #include "libchdr/chd.h"
 #include "libchdr/cdrom.h"
@@ -176,19 +172,16 @@ cd_data_t *chd_parse(const char *fname)
 		}
 		memset(&data->tracks[count], 0, sizeof(data->tracks[0]));
 
-		if (count == 1) {	// binary code
+		if (count == 1)
 			data->tracks[count].fname = strdup(fname);
-		        if (!strcmp(type, "MODE1_RAW") || !strcmp(type, "MODE2_RAW")) {
-			        data->tracks[count].type = CT_BIN;
-		        } else if (!strcmp(type, "MODE1") || !strcmp(type, "MODE2_FORM1")) {
-				data->tracks[count].type = CT_ISO;
-			} else
-				break;
-		} else {		// audio
-			if (strcmp(type, "AUDIO"))
-				break;
+	        if (!strcmp(type, "MODE1_RAW") || !strcmp(type, "MODE2_RAW")) {
+		        data->tracks[count].type = CT_BIN;
+	        } else if (!strcmp(type, "MODE1") || !strcmp(type, "MODE2_FORM1")) {
+			data->tracks[count].type = CT_ISO;
+		} else if (!strcmp(type, "AUDIO")) {
 			data->tracks[count].type = CT_CHD;
-		}
+		} else
+			break;
 
 		data->tracks[count].pregap = pregap;
 		if (pgtype[0] != 'V')	// VAUDIO includes pregap in file
@@ -348,16 +341,21 @@ file_ok:
 					else if (strcasecmp(ext, "wav") == 0)
 						data->tracks[count].type = CT_WAV;
 					else if (strcasecmp(ext, "bin") == 0)
-						data->tracks[count].type = CT_BIN;
+						data->tracks[count].type = CT_RAW;
 					else {
 						elprintf(EL_STATUS, "unhandled audio format: \"%s\"",
 							data->tracks[count].fname);
 					}
 				}
-				else
+				else if (data->tracks[count-1].type & CT_AUDIO)
 				{
 					// propagate previous
 					data->tracks[count].type = data->tracks[count-1].type;
+				}
+				else
+				{
+					// assume raw binary data
+					data->tracks[count].type = CT_RAW;
 				}
 			}
 			else {

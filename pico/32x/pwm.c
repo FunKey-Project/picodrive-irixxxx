@@ -34,20 +34,20 @@ void p32x_pwm_ctl_changed(void)
   // but mars test disagrees
   pwm.mult = 0;
   if ((control & 0x0f) != 0)
-    pwm.mult = 0x10000 / cycles;
+    pwm.mult = (0x10000<<8) / (cycles+1);
 
   pwm.irq_timer = (control & 0x0f00) >> 8;
   pwm.irq_timer = ((pwm.irq_timer - 1) & 0x0f) + 1;
   pwm.irq_reload = pwm.irq_timer;
   pwm.irq_state = pwm_irq_opt ? PWM_IRQ_STOPPED: PWM_IRQ_LOCKED;
 
-  if (Pico32x.pwm_irq_cnt == 0)
+  if (Pico32x.pwm_irq_cnt <= 0)
     Pico32x.pwm_irq_cnt = pwm.irq_reload;
 }
 
 static void do_pwm_irq(SH2 *sh2, unsigned int m68k_cycles)
 {
-  p32x_trigger_irq(sh2, m68k_cycles, P32XI_PWM);
+  p32x_trigger_irq(NULL, m68k_cycles, P32XI_PWM);
 
   if (Pico32x.regs[0x30 / 2] & P32XP_RTP) {
     p32x_event_schedule(m68k_cycles, P32X_EVENT_PWM, pwm.cycles / 3 + 1);
@@ -60,9 +60,7 @@ static int convert_sample(unsigned int v)
 {
   if (v > pwm.cycles)
     v = pwm.cycles;
-  if (v == 0)
-    return 0;
-  return v * pwm.mult - 0x10000/2;
+  return (v * pwm.mult >> 8) - 0x10000/2;
 }
 
 #define consume_fifo(sh2, m68k_cycles) { \
@@ -110,7 +108,7 @@ static void consume_fifo_do(SH2 *sh2, unsigned int m68k_cycles,
     mem->pwm[pwm.ptr * 2 + 1] = pwm.current[1];
     pwm.ptr = (pwm.ptr + 1) & (PWM_BUFF_LEN - 1);
 
-    if (--Pico32x.pwm_irq_cnt == 0) {
+    if (--Pico32x.pwm_irq_cnt <= 0) {
       Pico32x.pwm_irq_cnt = pwm.irq_reload;
       do_pwm_irq(sh2, m68k_cycles);
     } else if (Pico32x.pwm_p[1] == 0 && pwm.irq_state >= PWM_IRQ_LOW) {
@@ -266,7 +264,7 @@ void p32x_pwm_write16(u32 a, unsigned int d, SH2 *sh2, unsigned int m68k_cycles)
   }
 }
 
-void p32x_pwm_update(int *buf32, int length, int stereo)
+void p32x_pwm_update(s32 *buf32, int length, int stereo)
 {
   short *pwmb;
   int step;

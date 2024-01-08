@@ -35,7 +35,7 @@ void pemu_prep_defconfig(void)
 
 void pemu_validate_config(void)
 {
-#if !defined(__arm__) && !defined(__aarch64__) && !defined(__mips__) && !defined(__riscv__) &&  !defined(__riscv) && !defined(__powerpc__) && !defined(__ppc__) && !defined(__i386__) && !defined(__x86_64__)
+#if !defined(__arm__) && !defined(__aarch64__) && !defined(__mips__) && !defined(__riscv__) &&  !defined(__riscv) && !defined(__powerpc__) && !defined(__ppc__)  && !defined(__PPC__) && !defined(__i386__) && !defined(__x86_64__)
 	PicoIn.opt &= ~POPT_EN_DRC;
 #endif
 }
@@ -138,13 +138,13 @@ void screen_blit(u16 *pd, int pp, u8* ps, int ss, u16 *pal)
 	if (currentConfig.scaling == EOPT_SCALE_SW && out_w <= 256) {
 	    if (currentConfig.vscaling == EOPT_SCALE_SW && out_h <= 224)
 		// h+v scaling
-		upscale = out_w >= 256 ? upscale_256_224_hv: upscale_160_144_hv;
+		upscale = out_w >= 240 ? upscale_256_224_hv: upscale_160_144_hv;
 	    else
 		// h scaling
-		upscale = out_w >= 256 ? upscale_256_____h : upscale_160_____h;
+		upscale = out_w >= 240 ? upscale_256_____h : upscale_160_____h;
 	} else if (currentConfig.vscaling == EOPT_SCALE_SW && out_h <= 224)
 		// v scaling
-		upscale = out_w >= 256 ? upscale_____224_v : upscale_____144_v;
+		upscale = out_w >= 240 ? upscale_____224_v : upscale_____144_v;
 	if (!upscale) {
 		// no scaling
 		for (y = 0; y < out_h; y++)
@@ -165,6 +165,8 @@ void pemu_finalize_frame(const char *fps, const char *notice)
 
 		PicoDrawUpdateHighPal();
 
+		if (out_w == 248 && currentConfig.scaling == EOPT_SCALE_SW)
+			pd += (320 - out_w*320/256) / 2; // SMS with 1st tile blanked, recenter
 		screen_blit(pd, g_screen_ppitch, ps, 328, Pico.est.HighPal);
 	}
 
@@ -210,16 +212,13 @@ void plat_video_set_buffer(void *buf)
 
 static void apply_renderer(void)
 {
-	PicoIn.opt &= ~(POPT_ALT_RENDERER|POPT_EN_SOFTSCALE|POPT_DIS_32C_BORDER);
+	PicoIn.opt |= POPT_DIS_32C_BORDER;
+	PicoIn.opt &= ~(POPT_ALT_RENDERER|POPT_EN_SOFTSCALE);
 	if (is_16bit_mode()) {
-		if (currentConfig.scaling == EOPT_SCALE_SW) {
+		if (currentConfig.scaling == EOPT_SCALE_SW)
 			PicoIn.opt |= POPT_EN_SOFTSCALE;
-			PicoIn.filter = currentConfig.filter;
-		} else if (currentConfig.scaling == EOPT_SCALE_HW)
-			// hw scaling, render without any padding
-			PicoIn.opt |= POPT_DIS_32C_BORDER;
-	} else
-		PicoIn.opt |= POPT_DIS_32C_BORDER;
+		PicoIn.filter = currentConfig.filter;
+	}
 
 	switch (get_renderer()) {
 	case RT_16BIT:
@@ -250,6 +249,7 @@ static void apply_renderer(void)
 void plat_video_toggle_renderer(int change, int is_menu)
 {
 	change_renderer(change);
+	plat_video_clear_buffers();
 
 	if (!is_menu) {
 		apply_renderer();
@@ -303,14 +303,14 @@ void pemu_forced_frame(int no_scale, int do_emu)
 	Pico.m.dirtyPal = 1;
 	if (currentConfig.scaling)  currentConfig.scaling  = EOPT_SCALE_SW;
 	if (currentConfig.vscaling) currentConfig.vscaling = EOPT_SCALE_SW;
-	plat_video_set_size(g_menuscreen_w, g_menuscreen_h);
 
 	// render a frame in 16 bit mode
 	render_bg = 1;
 	emu_cmn_forced_frame(no_scale, do_emu, screen_buffer(g_screen_ptr));
 	render_bg = 0;
 
-	g_menubg_src_ptr = g_screen_ptr;
+	g_menubg_src_ptr = realloc(g_menubg_src_ptr, g_screen_height * g_screen_ppitch * 2);
+	memcpy(g_menubg_src_ptr, g_screen_ptr, g_screen_height * g_screen_ppitch * 2);
 	currentConfig.scaling = hs, currentConfig.vscaling = vs;
 }
 
@@ -372,6 +372,8 @@ void emu_video_mode_change(int start_line, int line_count, int start_col, int co
 	out_y = start_line; out_x = start_col;
 	out_h = line_count; out_w = col_count;
 
+	if (! render_bg)
+		plat_video_loop_prepare(); // recalculates g_screen_w/h
 	PicoDrawSetCallbacks(NULL, NULL);
 	// center output in screen
 	screen_w = g_screen_width,  screen_x = (screen_w - out_w)/2;
@@ -379,8 +381,9 @@ void emu_video_mode_change(int start_line, int line_count, int start_col, int co
 
 	switch (currentConfig.scaling) {
 	case EOPT_SCALE_HW:
-		screen_w = out_w;
-		screen_x = 0;
+		// mind aspect ratio for SMS with 1st column blanked
+		screen_w = (out_w == 248 ? 256 : out_w);
+		screen_x = (screen_w - out_w)/2;
 		break;
 	case EOPT_SCALE_SW:
 		screen_x = (screen_w - 320)/2;
@@ -408,8 +411,18 @@ void emu_video_mode_change(int start_line, int line_count, int start_col, int co
 		break;
 	}
 
-	if (screen_w != g_screen_width || screen_h != g_screen_height)
+	if (! render_bg)
 		plat_video_set_size(screen_w, screen_h);
+
+	if (screen_w < g_screen_width)
+		screen_x = (g_screen_width  - screen_w)/2;
+	if (screen_h < g_screen_height) {
+		screen_y = (g_screen_height - screen_h)/2;
+		// NTSC always has 224 visible lines, anything smaller has bars
+		if (out_h < 224 && out_h > 144)
+			screen_y += (224 - out_h)/2;
+	}
+
 	plat_video_set_buffer(g_screen_ptr);
 
 	// create a backing buffer for emulating the bad GG lcd display
@@ -435,7 +448,11 @@ void pemu_loop_prep(void)
 void pemu_loop_end(void)
 {
 	/* do one more frame for menu bg */
+	plat_video_set_shadow(320, 240);
 	pemu_forced_frame(0, 1);
+	g_menubg_src_w = g_screen_width;
+	g_menubg_src_h = g_screen_height;
+	g_menubg_src_pp = g_screen_ppitch;
 	if (ghost_buf) {
 		free(ghost_buf);
 		ghost_buf = NULL;

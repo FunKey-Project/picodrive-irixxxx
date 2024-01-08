@@ -1,5 +1,6 @@
 $(LD) ?= $(CC)
 TARGET ?= PicoDrive
+ASAN ?= 0
 DEBUG ?= 0
 CFLAGS += -I$(PWD)
 CYCLONE_CC ?= gcc
@@ -41,20 +42,42 @@ ifneq ($(findstring gcc,$(shell $(CC) -v 2>&1)),)
 endif
 endif
 
+ifeq "$(ASAN)" "1"
+	CFLAGS += -fsanitize=address -fsanitize=leak -fsanitize=bounds -fno-omit-frame-pointer -fno-common -O1 -g
+	LDLIBS += -fsanitize=address -fsanitize=leak -fsanitize=bounds -static-libasan
+else
 ifeq "$(DEBUG)" "0"
 	CFLAGS += -O3 -DNDEBUG
+endif
 endif
 	LD = $(CC)
 	OBJOUT ?= -o
 	LINKOUT ?= -o
 endif
 
-ifeq ("$(PLATFORM)",$(filter "$(PLATFORM)","gp2x" "opendingux" "rpi1"))
+
+chkCCflag = $(shell n=/dev/null; echo $(1) | tr " " "\n" | while read f; do \
+	    $(CC) $$f -x c -c $$n -o $$n 2>$$n && echo "_$$f" | tr -d _; done)
+
+ifeq ("$(PLATFORM)",$(filter "$(PLATFORM)","gp2x" "opendingux" "miyoo" "rpi1"))
 # very small caches, avoid optimization options making the binary much bigger
-CFLAGS += -finline-limit=42 -fno-unroll-loops -fno-ipa-cp -ffast-math
-# this gets you about 20% better execution speed on 32bit arm/mips
-CFLAGS += -fno-common -fno-stack-protector -fno-guess-branch-probability -fno-caller-saves -fno-tree-loop-if-convert -fno-regmove
+CFLAGS += -fno-common -finline-limit=42 -fno-unroll-loops -ffast-math
+CFLAGS += $(call chkCCflag, -fno-stack-protector)
+ifneq ($(call chkCCflag, -fipa-ra),) # gcc >= 5
+CFLAGS += $(call chkCCflag, -flto -fipa-pta -fipa-ra)
+else
+# these improve execution speed on 32bit arm/mips with gcc pre-5 toolchains
+CFLAGS += -fno-caller-saves -fno-guess-branch-probability -fno-regmove
+# very old gcc toolchains may not have these options
+CFLAGS += $(call chkCCflag, -fno-tree-loop-if-convert -fipa-pta -fno-ipa-cp)
 endif
+endif
+
+# revision info from repository if this not a tagged release
+ifeq "$(shell git describe --tags --exact-match HEAD 2>/dev/null)" ""
+GIT_REVISION ?= -$(shell git rev-parse --short HEAD || echo unknown)
+endif
+CFLAGS += -DREVISION=\"$(GIT_REVISION)\"
 
 # default settings
 use_libchdr ?= 1
@@ -84,11 +107,23 @@ endif
 
 -include Makefile.local
 
-ifeq "$(PLATFORM)" "opendingux"
+# TODO this should somehow go to the platform directory?
+ifeq "$(PLATFORM)" "generic"
+$(TARGET).zip: $(TARGET)
+	$(RM) -rf .od_data
+	mkdir .od_data
+	cp -r platform/linux/skin .od_data
+	cp platform/game_def.cfg .od_data
+	cp $< .od_data/PicoDrive
+	$(STRIP) .od_data/PicoDrive
+	cd .od_data && zip -9 -r ../$@ *
+all: $(TARGET).zip
+endif
 
-# TODO this should somehow go to the platform/opendingux directory?
+ifeq "$(PLATFORM)" "opendingux"
 .od_data: $(TARGET)
 	$(RM) -rf .od_data
+	mkdir .od_data
 	cp -r platform/opendingux/data/. .od_data
 	cp platform/game_def.cfg .od_data
 	cp $< .od_data/PicoDrive
@@ -119,6 +154,22 @@ use_inputmap ?= 1
 # OpenDingux is a generic platform, really.
 PLATFORM := generic
 endif
+ifeq "$(PLATFORM)" "miyoo"
+$(TARGET).zip: $(TARGET)
+	$(RM) -rf .od_data
+	mkdir .od_data
+	cp -r platform/opendingux/data/. .od_data
+	cp platform/game_def.cfg .od_data
+	cp $< .od_data/PicoDrive
+	$(STRIP) .od_data/PicoDrive
+	rm -f .od_data/default.*.desktop .od_data/PicoDrive.dge
+	cd .od_data && zip -9 -r ../$@ *
+all: $(TARGET).zip
+
+OBJS += platform/opendingux/inputmap.o
+use_inputmap ?= 1
+PLATFORM := generic
+endif
 ifeq ("$(PLATFORM)",$(filter "$(PLATFORM)","rpi1" "rpi2"))
 CFLAGS += -DHAVE_GLES -DRASPBERRY
 CFLAGS += -I/opt/vc/include/ -I/opt/vc/include/interface/vcos/pthreads/ -I/opt/vc/include/interface/vmcs_host/linux/
@@ -133,12 +184,15 @@ OBJS += platform/linux/emu.o platform/linux/blit.o # FIXME
 OBJS += platform/common/plat_sdl.o platform/common/input_sdlkbd.o
 OBJS += platform/libpicofe/plat_sdl.o platform/libpicofe/in_sdl.o
 OBJS += platform/libpicofe/plat_dummy.o platform/libpicofe/linux/plat.o
-OBJS += platform/libpicofe/gl.o
-OBJS += platform/libpicofe/gl_platform.o
 USE_FRONTEND = 1
 endif
 ifeq "$(PLATFORM)" "generic"
-CFLAGS += -DSDL_OVERLAY_2X -DSDL_BUFFER_3X
+#ifeq (y,$(shell echo "\#include <GLES/gl.h>" | $(CC) -E -xc - >/dev/null 2>&1 && echo y))
+ifeq "$(HAVE_GLES)" "1"
+CFLAGS += -DHAVE_GLES
+LDFLAGS += -lEGL -lGLESv1_CM
+endif
+CFLAGS += -DSDL_OVERLAY_2X -DSDL_BUFFER_3X -DSDL_REDRAW_EVT
 OBJS += platform/linux/emu.o platform/linux/blit.o # FIXME
 ifeq "$(use_inputmap)" "1"
 OBJS += platform/common/plat_sdl.o platform/opendingux/inputmap.o
@@ -180,7 +234,6 @@ OBJS += platform/gp2x/vid_pollux.o
 OBJS += platform/gp2x/warm.o 
 USE_FRONTEND = 1
 PLATFORM_MP3 = 1
-PLATFORM_ZLIB = 1
 endif
 ifeq "$(PLATFORM)" "psp"
 CFLAGS += -DUSE_BGR565 -G8 # -DLPRINTF_STDIO -DFW15
@@ -197,16 +250,24 @@ USE_FRONTEND = 1
 endif
 ifeq "$(PLATFORM)" "libretro"
 OBJS += platform/libretro/libretro.o
+ifneq ($(STATIC_LINKING), 1)
+OBJS += platform/libretro/libretro-common/compat/compat_strcasestr.o
 ifeq "$(USE_LIBRETRO_VFS)" "1"
 OBJS += platform/libretro/libretro-common/compat/compat_posix_string.o
 OBJS += platform/libretro/libretro-common/compat/compat_strl.o
 OBJS += platform/libretro/libretro-common/compat/fopen_utf8.o
 OBJS += platform/libretro/libretro-common/encodings/encoding_utf.o
+OBJS += platform/libretro/libretro-common/string/stdstring.o
+OBJS += platform/libretro/libretro-common/time/rtime.o
 OBJS += platform/libretro/libretro-common/streams/file_stream.o
 OBJS += platform/libretro/libretro-common/streams/file_stream_transforms.o
+OBJS += platform/libretro/libretro-common/file/file_path.o
 OBJS += platform/libretro/libretro-common/vfs/vfs_implementation.o
 endif
-PLATFORM_ZLIB ?= 1
+endif
+ifeq "$(USE_LIBRETRO_VFS)" "1"
+OBJS += platform/libretro/libretro-common/memmap/memmap.o
+endif
 endif
 
 ifeq "$(USE_FRONTEND)" "1"
@@ -218,6 +279,9 @@ OBJS += platform/common/main.o platform/common/configfile_fk.o platform/common/e
 # libpicofe
 OBJS += platform/libpicofe/input.o platform/libpicofe/readpng.o \
 	platform/libpicofe/fonts.o
+ifneq (,$(filter %HAVE_GLES, $(CFLAGS)))
+OBJS += platform/libpicofe/gl.o platform/libpicofe/gl_platform.o
+endif
 
 # libpicofe - sound
 OBJS += platform/libpicofe/sndout.o
@@ -261,17 +325,19 @@ CHDR_OBJS += $(CHDR)/src/libchdr_chd.o $(CHDR)/src/libchdr_cdrom.o
 CHDR_OBJS += $(CHDR)/src/libchdr_flac.o
 CHDR_OBJS += $(CHDR)/src/libchdr_bitstream.o $(CHDR)/src/libchdr_huffman.o
 
-# lzma
+# lzma - use 19.00 as newer versions have compile problems with libretro platforms
 LZMA = $(CHDR)/deps/lzma-19.00
 LZMA_OBJS += $(LZMA)/src/CpuArch.o $(LZMA)/src/Alloc.o $(LZMA)/src/LzmaEnc.o
 LZMA_OBJS += $(LZMA)/src/Sort.o $(LZMA)/src/LzmaDec.o $(LZMA)/src/LzFind.o
 LZMA_OBJS += $(LZMA)/src/Delta.o
 $(LZMA_OBJS): CFLAGS += -D_7ZIP_ST
 
-OBJS += $(CHDR_OBJS) $(LZMA_OBJS)
+OBJS += $(CHDR_OBJS)
+ifneq ($(STATIC_LINKING), 1)
+OBJS += $(LZMA_OBJS)
+endif
 # ouf... prepend includes to overload headers available in the toolchain
-CHDR_I = $(shell find $(CHDR) -name 'include')
-CFLAGS := $(patsubst %, -I%, $(CHDR_I)) $(CFLAGS)
+CFLAGS := -I$(LZMA)/include -I$(CHDR)/include $(CFLAGS)
 endif
 
 ifeq "$(PLATFORM_ZLIB)" "1"
@@ -307,14 +373,16 @@ target_: $(TARGET)
 
 clean:
 	$(RM) $(TARGET) $(OBJS) pico/pico_int_offs.h
+	$(MAKE) -C cpu/cyclone clean
+	$(MAKE) -C cpu/musashi clean
 	$(RM) -r .od_data
 
 $(TARGET): $(OBJS)
 
-ifeq ($(STATIC_LINKING), 1)
+ifeq ($(STATIC_LINKING_LINK), 1)
 	$(AR) rcs $@ $^
 else
-	$(LD) $(LINKOUT)$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(LD) $(LINKOUT)$@ $^ $(CFLAGS) $(LDFLAGS) $(LDLIBS)
 endif
 
 ifeq "$(PLATFORM)" "psp"
@@ -332,7 +400,7 @@ pprof: platform/linux/pprof.c
 	$(CC) $(CFLAGS) -O2 -ggdb -DPPROF -DPPROF_TOOL -I../../ -I. $^ -o $@ $(LDFLAGS) $(LDLIBS)
 
 pico/pico_int_offs.h: tools/mkoffsets.sh
-	make -C tools/ XCC="$(CC)" XCFLAGS="$(CFLAGS)" XPLATFORM="$(platform)"
+	make -C tools/ XCC="$(CC)" XCFLAGS="$(CFLAGS) -UUSE_LIBRETRO_VFS" XPLATFORM="$(platform)"
 
 %.o: %.c
 	$(CC) -c $(OBJOUT)$@ $< $(CFLAGS)
@@ -379,12 +447,13 @@ pico/carthw_cfg.c: pico/carthw.cfg
 # preprocessed asm files most probably include the offsets file
 $(filter %.S,$(SRCS_COMMON)): pico/pico_int_offs.h
 
-# random deps
+# random deps - TODO remove this and compute dependcies automatically
 pico/carthw/svp/compiler.o : cpu/drc/emit_arm.c
 cpu/sh2/compiler.o : cpu/drc/emit_arm.c cpu/drc/emit_arm64.c cpu/drc/emit_ppc.c
 cpu/sh2/compiler.o : cpu/drc/emit_x86.c cpu/drc/emit_mips.c cpu/drc/emit_riscv.c
 cpu/sh2/mame/sh2pico.o : cpu/sh2/mame/sh2.c
-pico/pico.o pico/cd/mcd.o pico/32x/32x.o : pico/pico_cmn.c pico/pico_int.h
-pico/memory.o pico/cd/memory.o pico/32x/memory.o : pico/pico_int.h pico/memory.h
+pico/pico.o pico/cd/mcd.o pico/32x/32x.o : pico/pico_cmn.c
+pico/memory.o pico/cd/memory.o pico/32x/memory.o : pico/memory.h
+$(shell grep -rl pico_int.h pico) : pico/pico_int.h
 # pico/cart.o : pico/carthw_cfg.c
 cpu/fame/famec.o: cpu/fame/famec.c cpu/fame/famec_opcodes.h

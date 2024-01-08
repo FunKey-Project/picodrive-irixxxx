@@ -1061,14 +1061,17 @@ static void emith_ldst_offs(int sz, int rd, int rn, int o9, int ld, int mode)
 		} \
 } while (0)
 
+#define host_call(addr, args) \
+	addr
+
 #define host_arg2reg(rd, arg) \
 	rd = arg
 
 #define emith_pass_arg_r(arg, reg) \
-	emith_move_r_r(arg, reg)
+	emith_move_r_r_ptr(arg, reg)
 
 #define emith_pass_arg_imm(arg, imm) \
-	emith_move_r_imm(arg, imm)
+	emith_move_r_ptr_imm(arg, imm)
 
 // branching; NB: A64 B.cond has only +/- 1MB range
 
@@ -1106,8 +1109,9 @@ static void emith_ldst_offs(int sz, int rd, int rn, int o9, int ld, int mode)
 #define emith_jump_patch_size()	4
 
 #define emith_jump_at(ptr, target) do { \
+	u32 *ptr_ = (u32 *)ptr; \
 	u32 disp_ = (u8 *)target - (u8 *)ptr; \
-	EMIT_PTR(ptr, A64_B(disp_ & 0x0fffffff)); \
+	EMIT_PTR(ptr_, A64_B(disp_ & 0x0fffffff)); \
 } while (0)
 #define emith_jump_at_size() 4
 
@@ -1135,7 +1139,7 @@ static void emith_ldst_offs(int sz, int rd, int rn, int o9, int ld, int mode)
 #define emith_call_reg(r) \
 	EMIT(A64_BLR(r))
 
-#define emith_call_ctx(offs) do { \
+#define emith_abicall_ctx(offs) do { \
 	int _t = rcache_get_tmp(); \
 	emith_ctx_read_ptr(_t, offs); \
 	emith_call_reg(_t); \
@@ -1225,7 +1229,7 @@ static void emith_ldst_offs(int sz, int rd, int rn, int o9, int ld, int mode)
 	emith_lsl(func, func, 3); \
 	emith_read_r_r_r_ptr(func, tab, func); \
 	emith_move_r_r_ptr(2, CONTEXT_REG); /* arg2 */ \
-	emith_jump_reg(func); \
+	emith_abijump_reg(func); \
 } while (0)
 
 #define emith_sh2_delay_loop(cycles, reg) do {			\
